@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.2.0
+// @version      0.3.0
 // @description  Draggable floating arrows for fast page top/bottom scrolling, including SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -29,13 +29,16 @@
   var Z_INDEX = "2147483647";
   var EXPANDED_WIDTH = 54;
   var EXPANDED_HEIGHT = 132;
-  var COLLAPSED_SIZE = 42;
+  var COLLAPSED_WIDTH = 54;
+  var COLLAPSED_HEIGHT = 54;
   var EDGE_MARGIN = 8;
 
   var host = null;
   var panel = null;
   var toggleButton = null;
   var observer = null;
+  var ensureTimer = null;
+  var destroyed = false;
   var collapsed = false;
   var drag = null;
   var currentPosition = null;
@@ -67,7 +70,7 @@
   }
 
   function getHostSize() {
-    if (collapsed) return { width: COLLAPSED_SIZE, height: COLLAPSED_SIZE };
+    if (collapsed) return { width: COLLAPSED_WIDTH, height: COLLAPSED_HEIGHT };
     return { width: EXPANDED_WIDTH, height: EXPANDED_HEIGHT };
   }
 
@@ -148,20 +151,23 @@
     style.textContent = [
       ":host{all:initial;}",
       ".panel{width:54px;height:132px;box-sizing:border-box;padding:7px 6px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.18);border-radius:12px;background:rgba(24,24,27,.88);box-shadow:0 10px 30px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
-      ".panel.collapsed{width:42px;height:42px;padding:0;border-radius:999px;justify-content:center;gap:0;}",
+      ".panel.collapsed{position:relative;width:54px;height:54px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
       ".topbar{width:100%;height:18px;display:flex;align-items:center;justify-content:flex-end;}",
-      ".panel.collapsed .topbar{width:42px;height:42px;justify-content:center;}",
+      ".panel.collapsed .topbar{position:absolute;top:0;right:0;width:42px;height:42px;justify-content:center;}",
       "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;font-family:Arial,Helvetica,sans-serif;line-height:1;user-select:none;-webkit-user-select:none;touch-action:none;}",
       ".toggle{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:15px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;}",
       ".toggle:hover{background:#38bdf8;color:#001018;}",
-      ".panel.collapsed .toggle{width:42px;height:42px;background:rgba(24,24,27,.9);border:1px solid rgba(255,255,255,.18);font-size:18px;box-shadow:0 6px 18px rgba(0,0,0,.24);}",
+      ".panel.collapsed .toggle{width:42px;height:42px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.18);font-size:18px;box-shadow:0 6px 18px rgba(0,0,0,.24);}",
       ".panel.collapsed .toggle:hover{background:#38bdf8;color:#001018;}",
+      ".close{display:none;}",
+      ".panel.collapsed .close{position:absolute;left:0;bottom:0;z-index:2;width:18px;height:18px;border-radius:999px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.24);color:#f8fafc;font-size:14px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.24);}",
+      ".panel.collapsed .close:hover{background:rgba(248,113,113,.96);color:#111827;}",
       ".arrow{width:42px;height:42px;border-radius:10px;background:rgba(255,255,255,.95);color:#111827;font-size:25px;font-weight:800;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.16);}",
       ".panel.collapsed .arrow{display:none;}",
       ".arrow:hover{background:#38bdf8;color:#001018;}",
-      ".arrow:active,.toggle:active{transform:translateY(1px);}",
-      ".arrow:focus-visible,.toggle:focus-visible{outline:2px solid #facc15;outline-offset:2px;}"
+      ".arrow:active,.toggle:active,.close:active{transform:translateY(1px);}",
+      ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}"
     ].join("");
 
     panel = document.createElement("div");
@@ -177,6 +183,7 @@
     panel.appendChild(topbar);
     panel.appendChild(makeButton("top", "Scroll to page top", "↑", "arrow"));
     panel.appendChild(makeButton("bottom", "Scroll to page bottom", "↓", "arrow"));
+    panel.appendChild(makeButton("close", "Close page scroll controls until reload", "×", "close"));
     syncCollapsedState();
 
     panel.addEventListener("pointerdown", onPointerDown, true);
@@ -288,6 +295,8 @@
       scrollPage("bottom");
     } else if (action === "toggle") {
       toggleCollapsed();
+    } else if (action === "close") {
+      destroyControls();
     }
   }
 
@@ -315,6 +324,7 @@
   }
 
   function mountHost() {
+    if (destroyed) return;
     if (!host) buildHost();
     applyHostStyle(host.isConnected ? getHostPosition() : currentPosition || getSavedPosition());
 
@@ -330,14 +340,25 @@
   function installObserver() {
     if (observer || !document.documentElement) return;
     observer = new MutationObserver(function () {
-      if (host && !host.isConnected) requestAnimationFrame(mountHost);
+      if (!destroyed && host && !host.isConnected) requestAnimationFrame(mountHost);
     });
     observer.observe(document.documentElement, { childList: true });
     if (document.body) observer.observe(document.body, { childList: true });
   }
 
+  function destroyControls() {
+    destroyed = true;
+    collapsed = false;
+    drag = null;
+    writeValue(STORAGE_COLLAPSED, false);
+    if (ensureTimer) window.clearInterval(ensureTimer);
+    if (observer) observer.disconnect();
+    if (host && host.parentNode) host.parentNode.removeChild(host);
+    window.removeEventListener("resize", onResize, true);
+  }
+
   function onResize() {
-    if (!host) return;
+    if (!host || destroyed) return;
     var next = clampPosition(getHostPosition());
     applyHostStyle(next);
     writeValue(STORAGE_POS, next);
@@ -466,7 +487,7 @@
   }
 
   mountHost();
-  window.setInterval(mountHost, 1000);
+  ensureTimer = window.setInterval(mountHost, 1000);
   window.addEventListener("resize", onResize, true);
   document.addEventListener("DOMContentLoaded", mountHost, { once: true, capture: true });
   window.addEventListener("load", mountHost, { once: true, capture: true });

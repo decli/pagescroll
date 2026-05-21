@@ -1,0 +1,89 @@
+# PageScroll
+
+一个轻量级 Tampermonkey / Violentmonkey 用户脚本：在任意网页显示可拖动的悬浮上下箭头，点击后快速滚动到页面顶部或底部。
+
+这个脚本的重点是兼容现代 SPA 页面和自定义滚动容器。它会使用 Shadow DOM 隔离样式，并在页面重渲染时自动恢复控件，尽量避免被页面样式或前端框架移除。
+
+## 功能
+
+- 在页面显示 `↑` / `↓` 两个悬浮按钮。
+- 点击 `↑` 快速滚动到顶部。
+- 点击 `↓` 快速滚动到底部。
+- 可拖动悬浮控件位置。
+- 自动保存拖动后的位置。
+- 支持一键关闭当前页面上的控件。
+- 支持常规页面滚动和常见自定义滚动容器。
+- 使用最高层级 `z-index`、Shadow DOM 和自动重挂载，提高在 ChatGPT 等复杂页面上的显示稳定性。
+
+## 安装
+
+1. 安装浏览器脚本管理器：
+   - [Tampermonkey](https://www.tampermonkey.net/)
+   - [Violentmonkey](https://violentmonkey.github.io/)
+2. 打开脚本安装地址：
+   - [PageScroll.user.js](https://raw.githubusercontent.com/decli/pagescroll/main/PageScroll.user.js)
+3. 在脚本管理器弹出的安装页中点击安装。
+
+## 使用
+
+- 拖动悬浮面板可以调整位置。
+- 点击 `↑` 滚动到当前页面或主要滚动区域顶部。
+- 点击 `↓` 滚动到当前页面或主要滚动区域底部。
+- 点击 `×` 关闭当前页面上的悬浮控件。
+
+关闭按钮只影响当前页面加载实例；刷新页面后脚本会重新运行。
+
+## 兼容性说明
+
+脚本会优先滚动浏览器的主页面滚动区域。如果页面本身不滚动，则会扫描页面中可见面积较大、具有纵向滚动能力的容器，并选择最可能的主滚动容器进行滚动。
+
+它对以下页面通常比普通扩展更稳：
+
+- React / Vue / Svelte 等 SPA 页面
+- 使用自定义滚动容器的页面
+- 会频繁重绘 DOM 的页面
+- 样式隔离较强的页面
+
+浏览器限制导致脚本通常无法运行在以下页面：
+
+- `chrome://` 等浏览器内置页面
+- Chrome Web Store
+- 浏览器扩展自身页面
+- 部分浏览器内置 PDF 页面或高权限页面
+
+## 技术实现
+
+- `@run-at document-start`：尽早注入。
+- Shadow DOM：隔离页面 CSS，避免控件被全局样式影响。
+- `z-index: 2147483647`：尽量保持控件位于最上层。
+- `MutationObserver` + 定时检查：页面移除控件后自动重挂载。
+- Pointer Events：统一支持鼠标、触控板和触屏拖动。
+- 主滚动容器探测：兼容 `document.scrollingElement` 和页面内部滚动容器。
+
+## 开发
+
+本项目不依赖构建工具，核心脚本就是：
+
+```text
+PageScroll.user.js
+```
+
+本地语法检查：
+
+```bash
+node --check PageScroll.user.js
+```
+
+## 目录
+
+```text
+.
+├── PageScroll.user.js
+├── README.md
+├── LICENSE
+└── .gitignore
+```
+
+## License
+
+MIT

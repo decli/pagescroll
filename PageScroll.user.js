@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.3.0
+// @version      0.4.0
 // @description  Draggable floating arrows for fast page top/bottom scrolling, including SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -13,8 +13,7 @@
 // @supportURL   https://github.com/decli/pagescroll/issues
 // @downloadURL  https://raw.githubusercontent.com/decli/pagescroll/main/PageScroll.user.js
 // @updateURL    https://raw.githubusercontent.com/decli/pagescroll/main/PageScroll.user.js
-// @grant        GM_getValue
-// @grant        GM_setValue
+// @grant        none
 // ==/UserScript==
 
 (function () {
@@ -23,8 +22,6 @@
   if (window.__pageScrollFloatingArrowsInstalled) return;
   window.__pageScrollFloatingArrowsInstalled = true;
 
-  var STORAGE_POS = "pageScrollFloatingArrows.position.v1";
-  var STORAGE_COLLAPSED = "pageScrollFloatingArrows.collapsed.v1";
   var HOST_ID = "page-scroll-floating-arrows-" + Math.random().toString(36).slice(2);
   var Z_INDEX = "2147483647";
   var EXPANDED_WIDTH = 54;
@@ -32,6 +29,8 @@
   var COLLAPSED_WIDTH = 54;
   var COLLAPSED_HEIGHT = 54;
   var EDGE_MARGIN = 8;
+  var DEFAULT_RIGHT_GAP = 24;
+  var DEFAULT_VERTICAL_RATIO = 0.5;
 
   var host = null;
   var panel = null;
@@ -42,64 +41,86 @@
   var collapsed = false;
   var drag = null;
   var currentPosition = null;
-
-  function readValue(key, fallback) {
-    try {
-      return GM_getValue(key, fallback);
-    } catch (error) {
-      try {
-        var raw = localStorage.getItem(key);
-        return raw ? JSON.parse(raw) : fallback;
-      } catch (innerError) {
-        return fallback;
-      }
-    }
-  }
-
-  function writeValue(key, value) {
-    try {
-      GM_setValue(key, value);
-      return;
-    } catch (error) {
-      try {
-        localStorage.setItem(key, JSON.stringify(value));
-      } catch (innerError) {
-        // Ignore storage failures. The control still works for the page load.
-      }
-    }
-  }
+  var manualPositionRatio = null;
 
   function getHostSize() {
     if (collapsed) return { width: COLLAPSED_WIDTH, height: COLLAPSED_HEIGHT };
     return { width: EXPANDED_WIDTH, height: EXPANDED_HEIGHT };
   }
 
+  function getViewportSize() {
+    var html = document.documentElement;
+    var clientWidth = html && html.clientWidth ? html.clientWidth : 0;
+    var clientHeight = html && html.clientHeight ? html.clientHeight : 0;
+    var innerWidth = window.innerWidth || clientWidth || 0;
+    var innerHeight = window.innerHeight || clientHeight || 0;
+
+    return {
+      width: Math.max(0, clientWidth ? Math.min(clientWidth, innerWidth || clientWidth) : innerWidth),
+      height: Math.max(0, innerHeight || clientHeight)
+    };
+  }
+
+  function clamp01(value) {
+    return Math.min(1, Math.max(0, Number(value) || 0));
+  }
+
+  function getPositionRange() {
+    var size = getHostSize();
+    var viewport = getViewportSize();
+    var maxLeft = Math.max(EDGE_MARGIN, viewport.width - size.width - EDGE_MARGIN);
+    var maxTop = Math.max(EDGE_MARGIN, viewport.height - size.height - EDGE_MARGIN);
+
+    return {
+      minLeft: EDGE_MARGIN,
+      maxLeft: maxLeft,
+      minTop: EDGE_MARGIN,
+      maxTop: maxTop
+    };
+  }
+
   function defaultPosition() {
     var size = getHostSize();
+    var viewport = getViewportSize();
     return {
-      left: Math.max(EDGE_MARGIN, window.innerWidth - size.width - 24),
-      top: Math.max(EDGE_MARGIN, Math.round(window.innerHeight * 0.55 - size.height / 2))
+      left: Math.max(EDGE_MARGIN, viewport.width - size.width - DEFAULT_RIGHT_GAP),
+      top: Math.max(EDGE_MARGIN, Math.round(viewport.height * DEFAULT_VERTICAL_RATIO - size.height / 2))
     };
   }
 
   function clampPosition(position) {
-    var size = getHostSize();
-    var viewportWidth = Math.max(window.innerWidth || 0, size.width + EDGE_MARGIN * 2);
-    var viewportHeight = Math.max(window.innerHeight || 0, size.height + EDGE_MARGIN * 2);
+    var range = getPositionRange();
     return {
-      left: Math.min(Math.max(Number(position.left) || EDGE_MARGIN, EDGE_MARGIN), viewportWidth - size.width - EDGE_MARGIN),
-      top: Math.min(Math.max(Number(position.top) || EDGE_MARGIN, EDGE_MARGIN), viewportHeight - size.height - EDGE_MARGIN)
+      left: Math.min(Math.max(Number(position.left) || EDGE_MARGIN, range.minLeft), range.maxLeft),
+      top: Math.min(Math.max(Number(position.top) || EDGE_MARGIN, range.minTop), range.maxTop)
     };
   }
 
-  function getSavedCollapsed() {
-    return readValue(STORAGE_COLLAPSED, false) === true;
+  function positionToRatio(position) {
+    var range = getPositionRange();
+    var width = Math.max(1, range.maxLeft - range.minLeft);
+    var height = Math.max(1, range.maxTop - range.minTop);
+
+    return {
+      x: clamp01((position.left - range.minLeft) / width),
+      y: clamp01((position.top - range.minTop) / height)
+    };
   }
 
-  function getSavedPosition() {
-    var saved = readValue(STORAGE_POS, null);
-    if (!saved || typeof saved !== "object") return defaultPosition();
-    return clampPosition(saved);
+  function ratioToPosition(ratio) {
+    var range = getPositionRange();
+    return clampPosition({
+      left: range.minLeft + (range.maxLeft - range.minLeft) * clamp01(ratio && ratio.x),
+      top: range.minTop + (range.maxTop - range.minTop) * clamp01(ratio && ratio.y)
+    });
+  }
+
+  function preferredPosition() {
+    return manualPositionRatio ? ratioToPosition(manualPositionRatio) : defaultPosition();
+  }
+
+  function rememberManualPosition() {
+    manualPositionRatio = positionToRatio(getHostPosition());
   }
 
   function applyHostStyle(position) {
@@ -117,12 +138,14 @@
     host.style.setProperty("padding", "0", "important");
     host.style.setProperty("border", "0", "important");
     host.style.setProperty("background", "transparent", "important");
+    host.style.setProperty("box-shadow", "none", "important");
+    host.style.setProperty("overflow", "visible", "important");
     host.style.setProperty("display", "block", "important");
     host.style.setProperty("visibility", "visible", "important");
     host.style.setProperty("opacity", "1", "important");
     host.style.setProperty("pointer-events", "auto", "important");
     host.style.setProperty("z-index", Z_INDEX, "important");
-    host.style.setProperty("contain", "layout style paint", "important");
+    host.style.setProperty("contain", "layout style", "important");
     host.style.setProperty("isolation", "isolate", "important");
     host.style.setProperty("box-sizing", "border-box", "important");
   }
@@ -138,8 +161,7 @@
   }
 
   function buildHost() {
-    collapsed = getSavedCollapsed();
-    var position = getSavedPosition();
+    var position = preferredPosition();
     currentPosition = position;
     host = document.createElement("div");
     host.id = HOST_ID;
@@ -151,17 +173,17 @@
     style.textContent = [
       ":host{all:initial;}",
       ".panel{width:54px;height:132px;box-sizing:border-box;padding:7px 6px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.18);border-radius:12px;background:rgba(24,24,27,.88);box-shadow:0 10px 30px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
-      ".panel.collapsed{position:relative;width:54px;height:54px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;}",
+      ".panel.collapsed{position:relative;width:54px;height:54px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
       ".topbar{width:100%;height:18px;display:flex;align-items:center;justify-content:flex-end;}",
       ".panel.collapsed .topbar{position:absolute;top:0;right:0;width:42px;height:42px;justify-content:center;}",
       "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;font-family:Arial,Helvetica,sans-serif;line-height:1;user-select:none;-webkit-user-select:none;touch-action:none;}",
       ".toggle{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:15px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;}",
       ".toggle:hover{background:#38bdf8;color:#001018;}",
-      ".panel.collapsed .toggle{width:42px;height:42px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.18);font-size:18px;box-shadow:0 6px 18px rgba(0,0,0,.24);}",
+      ".panel.collapsed .toggle{width:42px;height:42px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.18);font-size:18px;box-shadow:none;}",
       ".panel.collapsed .toggle:hover{background:#38bdf8;color:#001018;}",
       ".close{display:none;}",
-      ".panel.collapsed .close{position:absolute;left:0;bottom:0;z-index:2;width:18px;height:18px;border-radius:999px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.24);color:#f8fafc;font-size:14px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.24);}",
+      ".panel.collapsed .close{position:absolute;left:0;bottom:0;z-index:2;width:18px;height:18px;border-radius:999px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.24);color:#f8fafc;font-size:14px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:none;}",
       ".panel.collapsed .close:hover{background:rgba(248,113,113,.96);color:#111827;}",
       ".arrow{width:42px;height:42px;border-radius:10px;background:rgba(255,255,255,.95);color:#111827;font-size:25px;font-weight:800;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.16);}",
       ".panel.collapsed .arrow{display:none;}",
@@ -266,7 +288,7 @@
     }
 
     if (completed.moved) {
-      writeValue(STORAGE_POS, getHostPosition());
+      rememberManualPosition();
     } else if (completed.action) {
       runAction(completed.action);
     }
@@ -311,10 +333,21 @@
   }
 
   function toggleCollapsed() {
+    var oldSize = getHostSize();
+    var oldPosition = getHostPosition();
+    var center = {
+      x: oldPosition.left + oldSize.width / 2,
+      y: oldPosition.top + oldSize.height / 2
+    };
+
     collapsed = !collapsed;
+    var newSize = getHostSize();
+    currentPosition = clampPosition({
+      left: center.x - newSize.width / 2,
+      top: center.y - newSize.height / 2
+    });
     syncCollapsedState();
-    writeValue(STORAGE_COLLAPSED, collapsed);
-    writeValue(STORAGE_POS, getHostPosition());
+    if (manualPositionRatio) rememberManualPosition();
   }
 
   function getHostPosition() {
@@ -326,7 +359,7 @@
   function mountHost() {
     if (destroyed) return;
     if (!host) buildHost();
-    applyHostStyle(host.isConnected ? getHostPosition() : currentPosition || getSavedPosition());
+    if (!drag) applyHostStyle(preferredPosition());
 
     var parent = document.body || document.documentElement;
     if (!parent) {
@@ -350,7 +383,7 @@
     destroyed = true;
     collapsed = false;
     drag = null;
-    writeValue(STORAGE_COLLAPSED, false);
+    manualPositionRatio = null;
     if (ensureTimer) window.clearInterval(ensureTimer);
     if (observer) observer.disconnect();
     if (host && host.parentNode) host.parentNode.removeChild(host);
@@ -359,9 +392,7 @@
 
   function onResize() {
     if (!host || destroyed) return;
-    var next = clampPosition(getHostPosition());
-    applyHostStyle(next);
-    writeValue(STORAGE_POS, next);
+    applyHostStyle(preferredPosition());
   }
 
   function isRootScroller(element) {

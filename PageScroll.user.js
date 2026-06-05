@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.4.0
+// @version      0.5.0
 // @description  Draggable floating arrows for fast page top/bottom scrolling, including SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -26,8 +26,8 @@
   var Z_INDEX = "2147483647";
   var EXPANDED_WIDTH = 54;
   var EXPANDED_HEIGHT = 132;
-  var COLLAPSED_WIDTH = 54;
-  var COLLAPSED_HEIGHT = 54;
+  var COLLAPSED_WIDTH = 36;
+  var COLLAPSED_HEIGHT = 36;
   var EDGE_MARGIN = 8;
   var DEFAULT_RIGHT_GAP = 24;
   var DEFAULT_VERTICAL_RATIO = 0.5;
@@ -173,18 +173,18 @@
     style.textContent = [
       ":host{all:initial;}",
       ".panel{width:54px;height:132px;box-sizing:border-box;padding:7px 6px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.18);border-radius:12px;background:rgba(24,24,27,.88);box-shadow:0 10px 30px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
-      ".panel.collapsed{position:relative;width:54px;height:54px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
+      ".panel.collapsed{position:relative;width:36px;height:36px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
-      ".topbar{width:100%;height:18px;display:flex;align-items:center;justify-content:flex-end;}",
-      ".panel.collapsed .topbar{position:absolute;top:0;right:0;width:42px;height:42px;justify-content:center;}",
+      ".topbar{width:100%;height:18px;display:flex;align-items:center;justify-content:space-between;}",
+      ".panel.collapsed .topbar{position:absolute;top:0;right:0;width:36px;height:36px;justify-content:center;}",
       "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;font-family:Arial,Helvetica,sans-serif;line-height:1;user-select:none;-webkit-user-select:none;touch-action:none;}",
       ".toggle{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:15px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;}",
       ".toggle:hover{background:#38bdf8;color:#001018;}",
-      ".panel.collapsed .toggle{width:42px;height:42px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.18);font-size:18px;box-shadow:none;}",
+      ".panel.collapsed .toggle{width:36px;height:36px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.18);font-size:16px;box-shadow:none;}",
       ".panel.collapsed .toggle:hover{background:#38bdf8;color:#001018;}",
-      ".close{display:none;}",
-      ".panel.collapsed .close{position:absolute;left:0;bottom:0;z-index:2;width:18px;height:18px;border-radius:999px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.24);color:#f8fafc;font-size:14px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:none;}",
-      ".panel.collapsed .close:hover{background:rgba(248,113,113,.96);color:#111827;}",
+      ".close{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:14px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:none;}",
+      ".close:hover{background:rgba(248,113,113,.96);color:#111827;}",
+      ".panel.collapsed .close{display:none;}",
       ".arrow{width:42px;height:42px;border-radius:10px;background:rgba(255,255,255,.95);color:#111827;font-size:25px;font-weight:800;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.16);}",
       ".panel.collapsed .arrow{display:none;}",
       ".arrow:hover{background:#38bdf8;color:#001018;}",
@@ -200,12 +200,12 @@
     var topbar = document.createElement("div");
     topbar.className = "topbar";
     toggleButton = makeButton("toggle", "Collapse page scroll controls", "−", "toggle");
+    topbar.appendChild(makeButton("close", "Close page scroll controls until reload", "×", "close"));
     topbar.appendChild(toggleButton);
 
     panel.appendChild(topbar);
     panel.appendChild(makeButton("top", "Scroll to page top", "↑", "arrow"));
     panel.appendChild(makeButton("bottom", "Scroll to page bottom", "↓", "arrow"));
-    panel.appendChild(makeButton("close", "Close page scroll controls until reload", "×", "close"));
     syncCollapsedState();
 
     panel.addEventListener("pointerdown", onPointerDown, true);
@@ -434,46 +434,117 @@
     return Math.max(0, element.scrollHeight - element.clientHeight);
   }
 
+  function getViewportRect() {
+    var viewport = getViewportSize();
+    return {
+      left: 0,
+      top: 0,
+      right: viewport.width,
+      bottom: viewport.height,
+      width: viewport.width,
+      height: viewport.height
+    };
+  }
+
+  function getControlPoint() {
+    if (host && host.isConnected) {
+      var rect = host.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      };
+    }
+
+    var viewport = getViewportSize();
+    return {
+      x: viewport.width / 2,
+      y: viewport.height / 2
+    };
+  }
+
+  function rectContainsPoint(rect, point) {
+    return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+  }
+
+  function distanceFromPointToRect(point, rect) {
+    var dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
+    var dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
+    return Math.hypot(dx, dy);
+  }
+
   function visibleArea(rect) {
-    var width = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
-    var height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+    var viewport = getViewportSize();
+    var width = Math.max(0, Math.min(rect.right, viewport.width) - Math.max(rect.left, 0));
+    var height = Math.max(0, Math.min(rect.bottom, viewport.height) - Math.max(rect.top, 0));
     return width * height;
   }
 
   function hasScrollableOverflow(element) {
     var style = window.getComputedStyle(element);
     var overflow = (style.overflowY + " " + style.overflow).toLowerCase();
-    return /\b(auto|scroll|overlay)\b/.test(overflow);
+    return /\b(auto|scroll|overlay|hidden)\b/.test(overflow);
+  }
+
+  function getScrollerCandidate(element, point) {
+    if (!element || element === host) return null;
+    if (maxScrollTop(element) <= 8) return null;
+
+    var root = getRootScroller();
+    var isRoot = element === root || isRootScroller(element);
+    if (!isRoot && !hasScrollableOverflow(element)) return null;
+
+    var rect = isRoot ? getViewportRect() : element.getBoundingClientRect();
+    var area = visibleArea(rect);
+    if (!isRoot && area < 9000) return null;
+
+    return {
+      element: isRoot ? root : element,
+      isRoot: isRoot,
+      rect: rect,
+      area: area,
+      containsPoint: rectContainsPoint(rect, point),
+      distance: distanceFromPointToRect(point, rect),
+      scrollDistance: maxScrollTop(element)
+    };
+  }
+
+  function pointCandidateScore(candidate) {
+    var areaScore = Math.min(candidate.area, 800000);
+    var score = areaScore + candidate.scrollDistance * 30;
+    if (candidate.containsPoint) score += 100000000;
+    score -= candidate.distance * 200;
+    if (candidate.isRoot) score -= 10000000;
+    return score;
+  }
+
+  function chooseBetterCandidate(best, next) {
+    if (!next) return best;
+    if (!best) return next;
+    return pointCandidateScore(next) > pointCandidateScore(best) ? next : best;
   }
 
   function findPrimaryScroller() {
+    var point = getControlPoint();
     var root = getRootScroller();
-    if (root && maxScrollTop(root) > 8) return root;
-
-    var best = null;
-    var bestScore = 0;
+    var rootCandidate = getScrollerCandidate(root, point);
+    var bestAtPoint = null;
+    var bestNearby = null;
     var elements = document.querySelectorAll("body *");
 
     for (var index = 0; index < elements.length; index += 1) {
-      var element = elements[index];
-      if (!element || element === host) continue;
-      if (element.scrollHeight <= element.clientHeight + 8) continue;
-      if (!hasScrollableOverflow(element)) continue;
+      var candidate = getScrollerCandidate(elements[index], point);
+      if (!candidate || candidate.isRoot) continue;
 
-      var rect = element.getBoundingClientRect();
-      var area = visibleArea(rect);
-      if (area < 9000) continue;
-
-      var scrollDistance = element.scrollHeight - element.clientHeight;
-      var centered = rect.left < window.innerWidth * 0.75 && rect.right > window.innerWidth * 0.25 ? 1.15 : 1;
-      var score = (area + scrollDistance * 30) * centered;
-      if (score > bestScore) {
-        best = element;
-        bestScore = score;
+      if (candidate.containsPoint) {
+        bestAtPoint = chooseBetterCandidate(bestAtPoint, candidate);
       }
+      bestNearby = chooseBetterCandidate(bestNearby, candidate);
     }
 
-    return best || root;
+    if (bestAtPoint) return bestAtPoint.element;
+    if (bestNearby && bestNearby.distance <= 160) return bestNearby.element;
+    if (rootCandidate) return rootCandidate.element;
+    return bestNearby ? bestNearby.element : root;
   }
 
   function animateScroll(element, targetTop) {
@@ -510,11 +581,6 @@
 
     var targetTop = direction === "top" ? 0 : maxScrollTop(target);
     animateScroll(target, targetTop);
-
-    var root = getRootScroller();
-    if (root && root !== target && maxScrollTop(root) > 8) {
-      animateScroll(root, direction === "top" ? 0 : maxScrollTop(root));
-    }
   }
 
   mountHost();

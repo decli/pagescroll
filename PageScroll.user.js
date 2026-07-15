@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.5.0
-// @description  Draggable floating arrows for fast page top/bottom scrolling, including SPA pages with custom scroll containers.
+// @version      0.7.0
+// @description  Compact draggable floating arrows for fast page top/bottom scrolling. Right-click the widget to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
 // @match        *://*/*
@@ -13,7 +13,10 @@
 // @supportURL   https://github.com/decli/pagescroll/issues
 // @downloadURL  https://raw.githubusercontent.com/decli/pagescroll/main/PageScroll.user.js
 // @updateURL    https://raw.githubusercontent.com/decli/pagescroll/main/PageScroll.user.js
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
 // ==/UserScript==
 
 (function () {
@@ -24,13 +27,14 @@
 
   var HOST_ID = "page-scroll-floating-arrows-" + Math.random().toString(36).slice(2);
   var Z_INDEX = "2147483647";
-  var EXPANDED_WIDTH = 54;
-  var EXPANDED_HEIGHT = 132;
-  var COLLAPSED_WIDTH = 36;
-  var COLLAPSED_HEIGHT = 36;
+  var EXPANDED_WIDTH = 50;
+  var EXPANDED_HEIGHT = 50;
+  var COLLAPSED_WIDTH = 26;
+  var COLLAPSED_HEIGHT = 26;
   var EDGE_MARGIN = 8;
-  var DEFAULT_RIGHT_GAP = 24;
-  var DEFAULT_VERTICAL_RATIO = 0.5;
+  var DEFAULT_RIGHT_GAP = 16;
+  var DEFAULT_VERTICAL_RATIO = 0.2;
+  var STORAGE_KEY = "pagescroll:default-position";
 
   var host = null;
   var panel = null;
@@ -42,6 +46,12 @@
   var drag = null;
   var currentPosition = null;
   var manualPositionRatio = null;
+  var savedDefaultRatio = null;
+  var previewRatio = null;
+  var settingsEl = null;
+  var settingsInputX = null;
+  var settingsInputY = null;
+  var settingsOpen = false;
 
   function getHostSize() {
     if (collapsed) return { width: COLLAPSED_WIDTH, height: COLLAPSED_HEIGHT };
@@ -63,6 +73,66 @@
 
   function clamp01(value) {
     return Math.min(1, Math.max(0, Number(value) || 0));
+  }
+
+  function readStorage(key) {
+    var value = null;
+    try {
+      if (typeof GM_getValue === "function") value = GM_getValue(key, null);
+    } catch (error) {
+      value = null;
+    }
+    if (typeof value === "string" && value) return value;
+    try {
+      return window.localStorage ? window.localStorage.getItem(key) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function writeStorage(key, value) {
+    try {
+      if (typeof GM_setValue === "function") GM_setValue(key, value);
+    } catch (error) {
+      // GM storage may be unavailable; localStorage below is the fallback.
+    }
+    try {
+      if (window.localStorage) window.localStorage.setItem(key, value);
+    } catch (error) {
+      // Sandboxed pages can forbid localStorage; the config just won't persist.
+    }
+  }
+
+  function removeStorage(key) {
+    try {
+      if (typeof GM_deleteValue === "function") GM_deleteValue(key);
+    } catch (error) {
+      // Ignore and still clear the localStorage copy.
+    }
+    try {
+      if (window.localStorage) window.localStorage.removeItem(key);
+    } catch (error) {
+      // Nothing left to clear.
+    }
+  }
+
+  function loadSavedDefaultRatio() {
+    var raw = readStorage(STORAGE_KEY);
+    if (!raw) return null;
+    try {
+      var parsed = JSON.parse(raw);
+      if (parsed && isFinite(parsed.x) && isFinite(parsed.y)) {
+        return { x: clamp01(parsed.x), y: clamp01(parsed.y) };
+      }
+    } catch (error) {
+      // Corrupt config falls back to the built-in default.
+    }
+    return null;
+  }
+
+  function persistDefaultRatio(ratio) {
+    savedDefaultRatio = { x: clamp01(ratio.x), y: clamp01(ratio.y) };
+    writeStorage(STORAGE_KEY, JSON.stringify(savedDefaultRatio));
   }
 
   function getPositionRange() {
@@ -115,8 +185,29 @@
     });
   }
 
+  function centerRatioFromPosition(position) {
+    var size = getHostSize();
+    var viewport = getViewportSize();
+    return {
+      x: clamp01((position.left + size.width / 2) / Math.max(1, viewport.width)),
+      y: clamp01((position.top + size.height / 2) / Math.max(1, viewport.height))
+    };
+  }
+
+  function positionFromCenterRatio(ratio) {
+    var size = getHostSize();
+    var viewport = getViewportSize();
+    return clampPosition({
+      left: viewport.width * clamp01(ratio && ratio.x) - size.width / 2,
+      top: viewport.height * clamp01(ratio && ratio.y) - size.height / 2
+    });
+  }
+
   function preferredPosition() {
-    return manualPositionRatio ? ratioToPosition(manualPositionRatio) : defaultPosition();
+    if (previewRatio) return positionFromCenterRatio(previewRatio);
+    if (manualPositionRatio) return ratioToPosition(manualPositionRatio);
+    if (savedDefaultRatio) return positionFromCenterRatio(savedDefaultRatio);
+    return defaultPosition();
   }
 
   function rememberManualPosition() {
@@ -156,6 +247,7 @@
     button.className = className;
     button.dataset.action = action;
     button.setAttribute("aria-label", label);
+    button.title = label;
     button.textContent = glyph;
     return button;
   }
@@ -172,30 +264,49 @@
     var style = document.createElement("style");
     style.textContent = [
       ":host{all:initial;}",
-      ".panel{width:54px;height:132px;box-sizing:border-box;padding:7px 6px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.18);border-radius:12px;background:rgba(24,24,27,.88);box-shadow:0 10px 30px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
-      ".panel.collapsed{position:relative;width:36px;height:36px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
+      ".panel{width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:1px solid rgba(255,255,255,.18);border-radius:13px;background:rgba(24,24,27,.88);box-shadow:0 6px 20px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
+      ".panel.collapsed{position:relative;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
-      ".topbar{width:100%;height:18px;display:flex;align-items:center;justify-content:space-between;}",
-      ".panel.collapsed .topbar{position:absolute;top:0;right:0;width:36px;height:36px;justify-content:center;}",
-      "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;font-family:Arial,Helvetica,sans-serif;line-height:1;user-select:none;-webkit-user-select:none;touch-action:none;}",
-      ".toggle{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:15px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;}",
+      ".topbar{display:flex;align-items:center;gap:4px;opacity:.55;transition:opacity .12s ease;}",
+      ".panel:hover .topbar,.panel:focus-within .topbar{opacity:1;}",
+      ".panel.collapsed .topbar{position:absolute;top:0;right:0;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;justify-content:center;opacity:1;}",
+      ".arrows{display:flex;align-items:center;gap:4px;}",
+      ".panel.collapsed .arrows{display:none;}",
+      "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;padding:0;font-family:Arial,Helvetica,sans-serif;line-height:1;display:grid;place-items:center;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;}",
+      ".toggle,.close{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:11px;font-weight:700;}",
       ".toggle:hover{background:#38bdf8;color:#001018;}",
-      ".panel.collapsed .toggle{width:36px;height:36px;background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.18);font-size:16px;box-shadow:none;}",
-      ".panel.collapsed .toggle:hover{background:#38bdf8;color:#001018;}",
-      ".close{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:14px;font-weight:700;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:none;}",
       ".close:hover{background:rgba(248,113,113,.96);color:#111827;}",
+      ".panel.collapsed .toggle{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;background:rgba(24,24,27,.92);border:1px solid rgba(255,255,255,.18);font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.24);}",
+      ".panel.collapsed .toggle:hover{background:#38bdf8;color:#001018;}",
       ".panel.collapsed .close{display:none;}",
-      ".arrow{width:42px;height:42px;border-radius:10px;background:rgba(255,255,255,.95);color:#111827;font-size:25px;font-weight:800;display:grid;place-items:center;padding:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.16);}",
-      ".panel.collapsed .arrow{display:none;}",
+      ".arrow{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.95);color:#111827;font-size:13px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.2);}",
       ".arrow:hover{background:#38bdf8;color:#001018;}",
       ".arrow:active,.toggle:active,.close:active{transform:translateY(1px);}",
-      ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}"
+      ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}",
+      ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(24,24,27,.96);box-shadow:0 12px 32px rgba(0,0,0,.4);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#f8fafc;cursor:default;user-select:none;-webkit-user-select:none;}",
+      ".settings.open{display:flex;}",
+      ".settings-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;}",
+      ".settings-close{width:16px;height:16px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:10px;font-weight:700;}",
+      ".settings-close:hover{background:rgba(248,113,113,.96);color:#111827;}",
+      ".settings-row{display:flex;align-items:center;justify-content:space-between;gap:6px;}",
+      ".settings-row label{color:rgba(248,250,252,.85);}",
+      ".settings-field{display:flex;align-items:center;gap:4px;}",
+      ".settings-field span{color:rgba(248,250,252,.6);font-size:11px;}",
+      ".settings-row input{width:64px;box-sizing:border-box;padding:4px 6px;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:rgba(255,255,255,.08);color:#f8fafc;font-size:12px;font-family:inherit;outline:none;user-select:text;-webkit-user-select:text;}",
+      ".settings-row input:focus{border-color:#38bdf8;}",
+      ".settings-hint{color:rgba(248,250,252,.55);font-size:11px;line-height:1.5;}",
+      ".settings-actions{display:flex;justify-content:flex-end;gap:6px;}",
+      ".settings-actions button{padding:5px 9px;border-radius:6px;background:rgba(255,255,255,.12);color:#f8fafc;font-size:11px;font-weight:600;}",
+      ".settings-actions button:hover{background:rgba(255,255,255,.22);}",
+      ".settings-actions button.primary{background:#38bdf8;color:#001018;}",
+      ".settings-actions button.primary:hover{background:#7dd3fc;}"
     ].join("");
 
     panel = document.createElement("div");
     panel.className = "panel";
     panel.setAttribute("role", "group");
     panel.setAttribute("aria-label", "Page scroll controls");
+    panel.title = "拖动调整位置，右键打开设置";
 
     var topbar = document.createElement("div");
     topbar.className = "topbar";
@@ -203,9 +314,13 @@
     topbar.appendChild(makeButton("close", "Close page scroll controls until reload", "×", "close"));
     topbar.appendChild(toggleButton);
 
+    var arrows = document.createElement("div");
+    arrows.className = "arrows";
+    arrows.appendChild(makeButton("top", "Scroll to page top", "↑", "arrow"));
+    arrows.appendChild(makeButton("bottom", "Scroll to page bottom", "↓", "arrow"));
+
     panel.appendChild(topbar);
-    panel.appendChild(makeButton("top", "Scroll to page top", "↑", "arrow"));
-    panel.appendChild(makeButton("bottom", "Scroll to page bottom", "↓", "arrow"));
+    panel.appendChild(arrows);
     syncCollapsedState();
 
     panel.addEventListener("pointerdown", onPointerDown, true);
@@ -214,9 +329,185 @@
     panel.addEventListener("pointercancel", onPointerCancel, true);
     panel.addEventListener("click", stopEvent, true);
     panel.addEventListener("keydown", onKeyDown, true);
+    panel.addEventListener("contextmenu", onPanelContextMenu, true);
 
     shadow.appendChild(style);
     shadow.appendChild(panel);
+    buildSettings(shadow);
+  }
+
+  function makeSettingsInput() {
+    var input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "100";
+    input.step = "1";
+    return input;
+  }
+
+  function makeSettingsRow(labelText, input) {
+    var row = document.createElement("div");
+    row.className = "settings-row";
+    var label = document.createElement("label");
+    label.textContent = labelText;
+    var field = document.createElement("div");
+    field.className = "settings-field";
+    var unit = document.createElement("span");
+    unit.textContent = "%";
+    field.appendChild(input);
+    field.appendChild(unit);
+    row.appendChild(label);
+    row.appendChild(field);
+    return row;
+  }
+
+  function buildSettings(shadow) {
+    settingsEl = document.createElement("div");
+    settingsEl.className = "settings";
+    settingsEl.setAttribute("role", "dialog");
+    settingsEl.setAttribute("aria-label", "PageScroll position settings");
+
+    var head = document.createElement("div");
+    head.className = "settings-head";
+    var title = document.createElement("span");
+    title.textContent = "位置设置";
+    var closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "settings-close";
+    closeButton.title = "关闭";
+    closeButton.setAttribute("aria-label", "关闭设置");
+    closeButton.textContent = "×";
+    head.appendChild(title);
+    head.appendChild(closeButton);
+
+    settingsInputX = makeSettingsInput();
+    settingsInputY = makeSettingsInput();
+
+    var hint = document.createElement("div");
+    hint.className = "settings-hint";
+    hint.textContent = "控件中心相对窗口的百分比：0,0 为左上角，100,100 为右下角。修改会即时预览，保存后在所有页面生效。";
+
+    var actions = document.createElement("div");
+    actions.className = "settings-actions";
+    var resetButton = document.createElement("button");
+    resetButton.type = "button";
+    resetButton.textContent = "恢复内置";
+    resetButton.title = "恢复内置默认位置（右侧 20% 高度）";
+    var saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "primary";
+    saveButton.textContent = "保存";
+    saveButton.title = "保存为默认位置";
+    actions.appendChild(resetButton);
+    actions.appendChild(saveButton);
+
+    settingsEl.appendChild(head);
+    settingsEl.appendChild(makeSettingsRow("横向位置", settingsInputX));
+    settingsEl.appendChild(makeSettingsRow("纵向位置", settingsInputY));
+    settingsEl.appendChild(hint);
+    settingsEl.appendChild(actions);
+
+    var swallowed = ["pointerdown", "pointermove", "pointerup", "pointercancel", "click", "dblclick", "contextmenu", "wheel", "keyup", "keypress"];
+    for (var index = 0; index < swallowed.length; index += 1) {
+      settingsEl.addEventListener(swallowed[index], function (event) {
+        event.stopPropagation();
+      });
+    }
+    settingsEl.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        closeSettings();
+      } else if (event.key === "Enter" && event.target && event.target.tagName === "INPUT") {
+        saveSettings();
+      }
+      event.stopPropagation();
+    });
+
+    settingsInputX.addEventListener("input", onSettingsInput);
+    settingsInputY.addEventListener("input", onSettingsInput);
+    closeButton.addEventListener("click", closeSettings);
+    resetButton.addEventListener("click", resetDefaultPosition);
+    saveButton.addEventListener("click", saveSettings);
+
+    shadow.appendChild(settingsEl);
+  }
+
+  function readSettingsInputs() {
+    var current = centerRatioFromPosition(getHostPosition());
+    var x = settingsInputX ? parseFloat(settingsInputX.value) : NaN;
+    var y = settingsInputY ? parseFloat(settingsInputY.value) : NaN;
+    return {
+      x: isFinite(x) ? clamp01(x / 100) : current.x,
+      y: isFinite(y) ? clamp01(y / 100) : current.y
+    };
+  }
+
+  function syncSettingsInputs() {
+    if (!settingsInputX || !settingsInputY) return;
+    var ratio = centerRatioFromPosition(getHostPosition());
+    settingsInputX.value = String(Math.round(ratio.x * 100));
+    settingsInputY.value = String(Math.round(ratio.y * 100));
+  }
+
+  function positionSettings() {
+    if (!settingsEl || !settingsOpen) return;
+    var size = getHostSize();
+    var viewport = getViewportSize();
+    var hostPosition = getHostPosition();
+    var rect = settingsEl.getBoundingClientRect();
+    var width = rect.width || 208;
+    var height = rect.height || 170;
+
+    var left = -(width + 8);
+    if (hostPosition.left + left < EDGE_MARGIN) left = size.width + 8;
+
+    var top = 0;
+    var overflowBottom = hostPosition.top + height - (viewport.height - EDGE_MARGIN);
+    if (overflowBottom > 0) top = -overflowBottom;
+    if (hostPosition.top + top < EDGE_MARGIN) top = EDGE_MARGIN - hostPosition.top;
+
+    settingsEl.style.left = Math.round(left) + "px";
+    settingsEl.style.top = Math.round(top) + "px";
+  }
+
+  function onSettingsInput() {
+    previewRatio = readSettingsInputs();
+    if (!destroyed && host) applyHostStyle(positionFromCenterRatio(previewRatio));
+  }
+
+  function openSettings() {
+    if (destroyed || !settingsEl) return;
+    settingsOpen = true;
+    settingsEl.classList.add("open");
+    syncSettingsInputs();
+    positionSettings();
+    try {
+      settingsInputY.focus({ preventScroll: true });
+      settingsInputY.select();
+    } catch (error) {
+      // Focus is a nicety; ignore pages that block it.
+    }
+  }
+
+  function closeSettings() {
+    settingsOpen = false;
+    previewRatio = null;
+    if (settingsEl) settingsEl.classList.remove("open");
+    if (!destroyed && host) applyHostStyle(preferredPosition());
+  }
+
+  function saveSettings() {
+    persistDefaultRatio(readSettingsInputs());
+    manualPositionRatio = null;
+    closeSettings();
+  }
+
+  function onPanelContextMenu(event) {
+    stopEvent(event);
+    if (settingsOpen) {
+      closeSettings();
+    } else {
+      openSettings();
+    }
   }
 
   function stopEvent(event) {
@@ -289,6 +580,11 @@
 
     if (completed.moved) {
       rememberManualPosition();
+      if (settingsOpen) {
+        previewRatio = null;
+        syncSettingsInputs();
+        positionSettings();
+      }
     } else if (completed.action) {
       runAction(completed.action);
     }
@@ -327,9 +623,12 @@
 
     panel.classList.toggle("collapsed", collapsed);
     panel.setAttribute("aria-label", collapsed ? "Page scroll controls collapsed" : "Page scroll controls");
-    toggleButton.setAttribute("aria-label", collapsed ? "Expand page scroll controls" : "Collapse page scroll controls");
+    var toggleLabel = collapsed ? "Expand page scroll controls" : "Collapse page scroll controls";
+    toggleButton.setAttribute("aria-label", toggleLabel);
+    toggleButton.title = toggleLabel;
     toggleButton.textContent = collapsed ? "↕" : "−";
     applyHostStyle(currentPosition || defaultPosition());
+    if (settingsOpen) positionSettings();
   }
 
   function toggleCollapsed() {
@@ -384,6 +683,8 @@
     collapsed = false;
     drag = null;
     manualPositionRatio = null;
+    previewRatio = null;
+    settingsOpen = false;
     if (ensureTimer) window.clearInterval(ensureTimer);
     if (observer) observer.disconnect();
     if (host && host.parentNode) host.parentNode.removeChild(host);
@@ -393,6 +694,41 @@
   function onResize() {
     if (!host || destroyed) return;
     applyHostStyle(preferredPosition());
+    if (settingsOpen) {
+      syncSettingsInputs();
+      positionSettings();
+    }
+  }
+
+  function saveCurrentPositionAsDefault() {
+    persistDefaultRatio(centerRatioFromPosition(getHostPosition()));
+    manualPositionRatio = null;
+    previewRatio = null;
+    if (!destroyed && host) applyHostStyle(preferredPosition());
+    if (settingsOpen) syncSettingsInputs();
+  }
+
+  function resetDefaultPosition() {
+    savedDefaultRatio = null;
+    manualPositionRatio = null;
+    previewRatio = null;
+    removeStorage(STORAGE_KEY);
+    if (!destroyed && host) applyHostStyle(preferredPosition());
+    if (settingsOpen) {
+      syncSettingsInputs();
+      positionSettings();
+    }
+  }
+
+  function registerMenuCommands() {
+    if (typeof GM_registerMenuCommand !== "function") return;
+    try {
+      GM_registerMenuCommand("打开位置设置（或右键悬浮控件）", openSettings);
+      GM_registerMenuCommand("保存当前位置为默认位置", saveCurrentPositionAsDefault);
+      GM_registerMenuCommand("恢复内置默认位置（右侧 20% 高度）", resetDefaultPosition);
+    } catch (error) {
+      // Menu registration is optional; the widget works without it.
+    }
   }
 
   function isRootScroller(element) {
@@ -583,9 +919,11 @@
     animateScroll(target, targetTop);
   }
 
+  savedDefaultRatio = loadSavedDefaultRatio();
   mountHost();
   ensureTimer = window.setInterval(mountHost, 1000);
   window.addEventListener("resize", onResize, true);
   document.addEventListener("DOMContentLoaded", mountHost, { once: true, capture: true });
   window.addEventListener("load", mountHost, { once: true, capture: true });
+  registerMenuCommands();
 })();

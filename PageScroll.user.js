@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.11.2
+// @version      0.12.0
 // @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Right-click to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -34,6 +34,7 @@
   var COLLAPSED_WIDTH = 26;
   var COLLAPSED_HEIGHT = 26;
   var EXPAND_LINGER_MS = 3000;
+  var BEACON_CYCLE_MS = 3600;
   var EDGE_MARGIN = 8;
   var DEFAULT_RIGHT_GAP = 16;
   var DEFAULT_VERTICAL_RATIO = 0.2;
@@ -60,6 +61,8 @@
   var lensEl = null;
   var pointerInside = false;
   var lingerTimer = null;
+  var beaconTimer = null;
+  var beaconStart = 0;
   var motionQuery = null;
   try {
     motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -464,8 +467,8 @@
     var style = document.createElement("style");
     style.textContent = [
       ":host{all:initial;}",
-      ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-thin:rgba(28,28,32,.3);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);}",
-      ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-thin:rgba(255,255,255,.34);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);}",
+      ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-thin:rgba(28,28,32,.3);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);--beacon-glow:rgba(255,255,255,.42);--beacon-core:rgba(255,255,255,.16);}",
+      ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-thin:rgba(255,255,255,.34);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);--beacon-glow:rgba(10,132,255,.32);--beacon-core:rgba(10,132,255,.1);}",
       "@supports not ((backdrop-filter:blur(2px)) or (-webkit-backdrop-filter:blur(2px))){.glass-dark{--glass-bg:rgba(28,28,32,.9);--glass-bg-strong:rgba(28,28,32,.95);--chip-bg:rgba(58,58,64,.95);}.glass-light{--glass-bg:rgba(255,255,255,.92);--glass-bg-strong:rgba(255,255,255,.96);--chip-bg:rgba(255,255,255,.96);}}",
       ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid var(--glass-border);border-radius:999px;background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 48%);box-shadow:inset 0 1px 1px var(--rim-top),inset 0 -1px 1px var(--rim-bottom),0 8px 24px var(--shadow-color);backdrop-filter:blur(18px) saturate(180%);-webkit-backdrop-filter:blur(18px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;transition:width .28s " + MORPH_EASE + ",height .28s " + MORPH_EASE + ",padding .28s " + MORPH_EASE + ",background-color .25s ease;}",
       ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;}",
@@ -489,12 +492,14 @@
       ".close:hover{background-color:rgba(255,69,58,.92);border-color:transparent;color:#fff;}",
       ".panel.collapsed .toggle{position:absolute;left:0;top:0;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:0;background:transparent;box-shadow:none;font-size:8px;line-height:1.15;white-space:pre;text-align:center;transition:opacity .16s ease .1s;}",
       ".panel.collapsed .toggle:hover{background-color:var(--hover-bg);color:var(--ink);}",
+      ".panel.collapsed.beacon::after{content:'';position:absolute;inset:-3px;border-radius:999px;pointer-events:none;z-index:-1;background:radial-gradient(circle at 50% 42%,var(--beacon-core),rgba(255,255,255,0) 72%);box-shadow:0 0 10px 2px var(--beacon-glow);opacity:0;transform:scale(.94);animation:ps-breathe " + (BEACON_CYCLE_MS / 1000) + "s ease-in-out infinite;}",
+      "@keyframes ps-breathe{0%,100%{opacity:0;transform:scale(.94);}50%{opacity:1;transform:scale(1.05);}}",
       ".panel.collapsed .close{display:none;}",
       ".arrow:active{transform:translateY(1px);}",
       ".close:active,.toggle:active{transform:translateX(-50%) scale(.92);}",
       ".panel.collapsed .toggle:active{transform:scale(.94);}",
       ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}",
-      "@media (prefers-reduced-motion:reduce){.panel,.arrows,.close,.toggle{transition:none;}}",
+      "@media (prefers-reduced-motion:reduce){.panel,.arrows,.close,.toggle{transition:none;}.panel.collapsed.beacon::after{animation:none;opacity:0;}}",
       ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid var(--glass-border);border-radius:14px;background-color:var(--glass-bg-strong);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 40%);box-shadow:inset 0 1px 1px var(--rim-top),0 12px 32px var(--shadow-color);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:12px;color:var(--ink);cursor:default;user-select:none;-webkit-user-select:none;}",
       ".settings.open{display:flex;}",
       ".settings-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;}",
@@ -804,6 +809,7 @@
 
   function onAnyScroll() {
     scheduleGlassUpdate();
+    if (!destroyed && collapsed) requestBeacon(BEACON_CYCLE_MS * 2);
   }
 
   function actionFromEvent(event) {
@@ -938,6 +944,11 @@
     syncCollapsedState();
     if (manualPositionRatio) rememberManualPosition(currentPosition);
     scheduleGlassUpdate();
+    if (collapsed) {
+      requestBeacon(BEACON_CYCLE_MS * 2);
+    } else {
+      stopBeacon();
+    }
   }
 
   function toggleCollapsed() {
@@ -960,6 +971,34 @@
       if (destroyed || collapsed || drag || settingsOpen || pointerInside) return;
       setCollapsed(true);
     }, EXPAND_LINGER_MS);
+  }
+
+  // The beacon breathes only when the user plausibly needs to locate the
+  // ball: shortly after load, while scrolling, and right after collapsing.
+  // Stops are aligned to cycle boundaries so the glow always fades out at
+  // zero opacity instead of being cut mid-breath.
+  function stopBeacon() {
+    if (beaconTimer) {
+      window.clearTimeout(beaconTimer);
+      beaconTimer = null;
+    }
+    if (panel) panel.classList.remove("beacon");
+  }
+
+  function requestBeacon(duration) {
+    if (destroyed || !panel || !collapsed || prefersReducedMotion()) return;
+    var now = Date.now();
+    if (!panel.classList.contains("beacon")) {
+      panel.classList.add("beacon");
+      beaconStart = now;
+    }
+    var cycles = Math.max(1, Math.ceil((now + duration - beaconStart) / BEACON_CYCLE_MS));
+    var end = beaconStart + cycles * BEACON_CYCLE_MS + 40;
+    if (beaconTimer) window.clearTimeout(beaconTimer);
+    beaconTimer = window.setTimeout(function () {
+      beaconTimer = null;
+      if (panel) panel.classList.remove("beacon");
+    }, Math.max(0, end - now));
   }
 
   function onPanelPointerEnter() {
@@ -1021,6 +1060,7 @@
     previewRatio = null;
     settingsOpen = false;
     clearLingerTimer();
+    stopBeacon();
     if (ensureTimer) window.clearInterval(ensureTimer);
     if (glassUpdateTimer) {
       window.clearTimeout(glassUpdateTimer);
@@ -1263,6 +1303,7 @@
 
   savedDefaultRatio = loadSavedDefaultRatio();
   mountHost();
+  requestBeacon(BEACON_CYCLE_MS * 3);
   ensureTimer = window.setInterval(mountHost, 1000);
   window.addEventListener("resize", onResize, true);
   window.addEventListener("scroll", onAnyScroll, { capture: true, passive: true });

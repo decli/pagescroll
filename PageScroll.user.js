@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.10.0
+// @version      0.11.0
 // @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Right-click to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -27,6 +27,8 @@
 
   var HOST_ID = "page-scroll-floating-arrows-" + Math.random().toString(36).slice(2);
   var Z_INDEX = "2147483647";
+  var MORPH_EASE = "cubic-bezier(.2,.8,.2,1)";
+  var HOST_MORPH_TRANSITION = "left .28s " + MORPH_EASE + ",top .28s " + MORPH_EASE + ",width .28s " + MORPH_EASE + ",height .28s " + MORPH_EASE;
   var EXPANDED_WIDTH = 34;
   var EXPANDED_HEIGHT = 72;
   var COLLAPSED_WIDTH = 26;
@@ -58,6 +60,16 @@
   var lensEl = null;
   var pointerInside = false;
   var lingerTimer = null;
+  var motionQuery = null;
+  try {
+    motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  } catch (error) {
+    motionQuery = null;
+  }
+
+  function prefersReducedMotion() {
+    return !!(motionQuery && motionQuery.matches);
+  }
 
   function getHostSize() {
     if (collapsed) return { width: COLLAPSED_WIDTH, height: COLLAPSED_HEIGHT };
@@ -141,8 +153,8 @@
     writeStorage(STORAGE_KEY, JSON.stringify(savedDefaultRatio));
   }
 
-  function getPositionRange() {
-    var size = getHostSize();
+  function getPositionRange(size) {
+    size = size || getHostSize();
     var viewport = getViewportSize();
     var maxLeft = Math.max(EDGE_MARGIN, viewport.width - size.width - EDGE_MARGIN);
     var maxTop = Math.max(EDGE_MARGIN, viewport.height - size.height - EDGE_MARGIN);
@@ -155,8 +167,8 @@
     };
   }
 
-  function defaultPosition() {
-    var size = getHostSize();
+  function defaultPosition(size) {
+    size = size || getHostSize();
     var viewport = getViewportSize();
     return {
       left: Math.max(EDGE_MARGIN, viewport.width - size.width - DEFAULT_RIGHT_GAP),
@@ -164,12 +176,26 @@
     };
   }
 
-  function clampPosition(position) {
-    var range = getPositionRange();
+  function clampPosition(position, size) {
+    var range = getPositionRange(size);
     return {
       left: Math.min(Math.max(Number(position.left) || EDGE_MARGIN, range.minLeft), range.maxLeft),
       top: Math.min(Math.max(Number(position.top) || EDGE_MARGIN, range.minTop), range.maxTop)
     };
+  }
+
+  // Reposition a box for a new size without the perceived sideways jump:
+  // pin the horizontal edge nearest to the viewport side it is docked
+  // against, and keep the vertical center, so the widget grows/shrinks
+  // toward the screen interior only.
+  function anchorSizeChange(oldSize, oldPosition, newSize) {
+    var viewport = getViewportSize();
+    var centerX = oldPosition.left + oldSize.width / 2;
+    var left = centerX >= viewport.width / 2
+      ? oldPosition.left + oldSize.width - newSize.width
+      : oldPosition.left;
+    var top = oldPosition.top + oldSize.height / 2 - newSize.height / 2;
+    return clampPosition({ left: left, top: top }, newSize);
   }
 
   function positionToRatio(position) {
@@ -200,20 +226,34 @@
     };
   }
 
-  function positionFromCenterRatio(ratio) {
-    var size = getHostSize();
+  function positionFromCenterRatio(ratio, size) {
+    size = size || getHostSize();
     var viewport = getViewportSize();
     return clampPosition({
       left: viewport.width * clamp01(ratio && ratio.x) - size.width / 2,
       top: viewport.height * clamp01(ratio && ratio.y) - size.height / 2
-    });
+    }, size);
   }
 
   function preferredPosition() {
-    if (previewRatio) return positionFromCenterRatio(previewRatio);
-    if (manualPositionRatio) return ratioToPosition(manualPositionRatio);
-    if (savedDefaultRatio) return positionFromCenterRatio(savedDefaultRatio);
-    return defaultPosition();
+    // Manually dragged positions are stored against the current size and
+    // re-synced on every collapse/expand, so they are stable as-is.
+    if (!previewRatio && manualPositionRatio) return ratioToPosition(manualPositionRatio);
+
+    // Every other flow derives from the canonical expanded box, then maps
+    // it through the same anchor rule setCollapsed uses, so the periodic
+    // keep-alive can never disagree with a just-toggled position.
+    var expandedSize = { width: EXPANDED_WIDTH, height: EXPANDED_HEIGHT };
+    var expandedBox;
+    if (previewRatio) {
+      expandedBox = positionFromCenterRatio(previewRatio, expandedSize);
+    } else if (savedDefaultRatio) {
+      expandedBox = positionFromCenterRatio(savedDefaultRatio, expandedSize);
+    } else {
+      expandedBox = defaultPosition(expandedSize);
+    }
+    if (!collapsed) return expandedBox;
+    return anchorSizeChange(expandedSize, expandedBox, getHostSize());
   }
 
   function rememberManualPosition() {
@@ -245,6 +285,8 @@
     host.style.setProperty("contain", "layout style", "important");
     host.style.setProperty("isolation", "isolate", "important");
     host.style.setProperty("box-sizing", "border-box", "important");
+    var animate = !drag && !prefersReducedMotion();
+    host.style.setProperty("transition", animate ? HOST_MORPH_TRANSITION : "none", "important");
   }
 
   function buildLensMap(width, height, band, power) {
@@ -423,17 +465,15 @@
       ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-thin:rgba(28,28,32,.3);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);}",
       ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-thin:rgba(255,255,255,.34);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);}",
       "@supports not ((backdrop-filter:blur(2px)) or (-webkit-backdrop-filter:blur(2px))){.glass-dark{--glass-bg:rgba(28,28,32,.9);--glass-bg-strong:rgba(28,28,32,.95);--chip-bg:rgba(58,58,64,.95);}.glass-light{--glass-bg:rgba(255,255,255,.92);--glass-bg-strong:rgba(255,255,255,.96);--chip-bg:rgba(255,255,255,.96);}}",
-      ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid var(--glass-border);border-radius:999px;background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 48%);box-shadow:inset 0 1px 1px var(--rim-top),inset 0 -1px 1px var(--rim-bottom),0 8px 24px var(--shadow-color);backdrop-filter:blur(18px) saturate(180%);-webkit-backdrop-filter:blur(18px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;transition:background-color .25s ease;}",
-      ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;border:0;border-radius:0;background:none;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
+      ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid var(--glass-border);border-radius:999px;background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 48%);box-shadow:inset 0 1px 1px var(--rim-top),inset 0 -1px 1px var(--rim-bottom),0 8px 24px var(--shadow-color);backdrop-filter:blur(18px) saturate(180%);-webkit-backdrop-filter:blur(18px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;transition:width .28s " + MORPH_EASE + ",height .28s " + MORPH_EASE + ",padding .28s " + MORPH_EASE + ",background-color .25s ease;}",
+      ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
       ".lens{position:absolute;inset:0;border-radius:999px;pointer-events:none;display:none;}",
       ".lens.on{display:block;backdrop-filter:url(#ps-lens-capsule);-webkit-backdrop-filter:url(#ps-lens-capsule);}",
       ".lens.on.ball{backdrop-filter:url(#ps-lens-ball);-webkit-backdrop-filter:url(#ps-lens-ball);}",
       ".panel.lens-on{background-color:var(--glass-bg-thin);backdrop-filter:blur(3px) saturate(170%);-webkit-backdrop-filter:blur(3px) saturate(170%);}",
-      ".panel.lens-on.collapsed{background:none;backdrop-filter:none;-webkit-backdrop-filter:none;}",
-      ".panel.lens-on.collapsed .toggle{background-color:var(--glass-bg-thin);backdrop-filter:blur(3px) saturate(170%);-webkit-backdrop-filter:blur(3px) saturate(170%);}",
-      ".arrows{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:space-between;}",
-      ".panel.collapsed .arrows{display:none;}",
+      ".arrows{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:space-between;opacity:1;transition:opacity .18s ease .06s,visibility 0s linear;}",
+      ".panel.collapsed .arrows{opacity:0;visibility:hidden;transition:opacity .12s ease,visibility 0s linear .12s;}",
       ".divider{width:14px;height:1px;background:var(--divider);}",
       "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1;display:grid;place-items:center;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;}",
       ".arrow{width:24px;height:24px;border-radius:999px;background:transparent;color:var(--ink);font-size:14px;font-weight:800;transition:background-color .15s ease,color .15s ease;}",
@@ -445,13 +485,14 @@
       "@media (hover:none){.close,.toggle{opacity:1;transform:translateX(-50%) scale(1);pointer-events:auto;}}",
       ".toggle:hover{background-color:rgba(10,132,255,.92);border-color:transparent;color:#fff;}",
       ".close:hover{background-color:rgba(255,69,58,.92);border-color:transparent;color:#fff;}",
-      ".panel.collapsed .toggle{position:static;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:1px solid var(--glass-border);background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 55%);font-size:12px;box-shadow:inset 0 1px 1px var(--rim-top),0 4px 14px var(--shadow-color);backdrop-filter:blur(14px) saturate(180%);-webkit-backdrop-filter:blur(14px) saturate(180%);}",
-      ".panel.collapsed .toggle:hover{background-color:var(--chip-hover);border-color:var(--glass-border);color:var(--ink);}",
+      ".panel.collapsed .toggle{position:absolute;left:0;top:0;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:0;background:transparent;box-shadow:none;font-size:12px;transition:opacity .16s ease .1s;}",
+      ".panel.collapsed .toggle:hover{background-color:var(--hover-bg);color:var(--ink);}",
       ".panel.collapsed .close{display:none;}",
       ".arrow:active{transform:translateY(1px);}",
       ".close:active,.toggle:active{transform:translateX(-50%) scale(.92);}",
       ".panel.collapsed .toggle:active{transform:scale(.94);}",
       ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}",
+      "@media (prefers-reduced-motion:reduce){.panel,.arrows,.close,.toggle{transition:none;}}",
       ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid var(--glass-border);border-radius:14px;background-color:var(--glass-bg-strong);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 40%);box-shadow:inset 0 1px 1px var(--rim-top),0 12px 32px var(--shadow-color);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:12px;color:var(--ink);cursor:default;user-select:none;-webkit-user-select:none;}",
       ".settings.open{display:flex;}",
       ".settings-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;}",
@@ -884,18 +925,14 @@
     next = !!next;
     if (collapsed === next) return;
     var oldSize = getHostSize();
-    var oldPosition = getHostPosition();
-    var center = {
-      x: oldPosition.left + oldSize.width / 2,
-      y: oldPosition.top + oldSize.height / 2
-    };
+    // Anchor from the logical target position, not the animated rect, so a
+    // toggle that lands mid-transition still resolves to a stable spot.
+    var oldPosition = currentPosition
+      ? { left: currentPosition.left, top: currentPosition.top }
+      : getHostPosition();
 
     collapsed = next;
-    var newSize = getHostSize();
-    currentPosition = clampPosition({
-      left: center.x - newSize.width / 2,
-      top: center.y - newSize.height / 2
-    });
+    currentPosition = anchorSizeChange(oldSize, oldPosition, getHostSize());
     syncCollapsedState();
     if (manualPositionRatio) rememberManualPosition();
     scheduleGlassUpdate();

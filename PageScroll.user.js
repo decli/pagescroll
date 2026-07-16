@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.9.0
-// @description  Slim draggable liquid-glass capsule for fast page top/bottom scrolling. The frosted material adapts to the page behind it; hover reveals collapse/close; right-click the widget to configure its default position. Supports SPA pages with custom scroll containers.
+// @version      0.10.0
+// @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Right-click to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
 // @match        *://*/*
@@ -31,6 +31,7 @@
   var EXPANDED_HEIGHT = 72;
   var COLLAPSED_WIDTH = 26;
   var COLLAPSED_HEIGHT = 26;
+  var EXPAND_LINGER_MS = 3000;
   var EDGE_MARGIN = 8;
   var DEFAULT_RIGHT_GAP = 16;
   var DEFAULT_VERTICAL_RATIO = 0.2;
@@ -42,7 +43,7 @@
   var observer = null;
   var ensureTimer = null;
   var destroyed = false;
-  var collapsed = false;
+  var collapsed = true;
   var drag = null;
   var currentPosition = null;
   var manualPositionRatio = null;
@@ -54,6 +55,9 @@
   var settingsOpen = false;
   var glassLight = false;
   var glassUpdateTimer = null;
+  var lensEl = null;
+  var pointerInside = false;
+  var lingerTimer = null;
 
   function getHostSize() {
     if (collapsed) return { width: COLLAPSED_WIDTH, height: COLLAPSED_HEIGHT };
@@ -243,6 +247,156 @@
     host.style.setProperty("box-sizing", "border-box", "important");
   }
 
+  function buildLensMap(width, height, band, power) {
+    var dpr = Math.min(3, Math.max(2, Math.round(window.devicePixelRatio || 1)));
+    var mapWidth = Math.round(width * dpr);
+    var mapHeight = Math.round(height * dpr);
+    var canvas = document.createElement("canvas");
+    canvas.width = mapWidth;
+    canvas.height = mapHeight;
+    var context = canvas.getContext("2d");
+    var image = context.createImageData(mapWidth, mapHeight);
+    var data = image.data;
+    var radius = Math.min(width, height) / 2;
+    var centerX = width / 2;
+    var centerY = height / 2;
+    var vectors = new Float32Array(mapWidth * mapHeight * 2);
+    var maxDisplacement = 0;
+
+    for (var py = 0; py < mapHeight; py += 1) {
+      for (var px = 0; px < mapWidth; px += 1) {
+        var x = (px + 0.5) / dpr;
+        var y = (py + 0.5) / dpr;
+        var qx = Math.abs(x - centerX) - (width / 2 - radius);
+        var qy = Math.abs(y - centerY) - (height / 2 - radius);
+        var outerX = Math.max(qx, 0);
+        var outerY = Math.max(qy, 0);
+        var sdf = Math.min(Math.max(qx, qy), 0) + Math.hypot(outerX, outerY) - radius;
+        if (sdf > 0) continue;
+        // Lens profile: neutral in the middle, bending samples toward the
+        // center inside the edge band, so the rim magnifies like convex glass.
+        var t = Math.min(1, Math.max(0, 1 + sdf / band));
+        var eased = t * t * (3 - 2 * t);
+        eased *= eased;
+        var offset = (py * mapWidth + px) * 2;
+        vectors[offset] = (centerX - x) * power * eased;
+        vectors[offset + 1] = (centerY - y) * power * eased;
+        var magnitude = Math.max(Math.abs(vectors[offset]), Math.abs(vectors[offset + 1]));
+        if (magnitude > maxDisplacement) maxDisplacement = magnitude;
+      }
+    }
+
+    for (var index = 0; index < mapWidth * mapHeight; index += 1) {
+      var source = index * 2;
+      var target = index * 4;
+      var nx = maxDisplacement > 0 ? vectors[source] / maxDisplacement : 0;
+      var ny = maxDisplacement > 0 ? vectors[source + 1] / maxDisplacement : 0;
+      data[target] = Math.round(127.5 + nx * 127.5);
+      data[target + 1] = Math.round(127.5 + ny * 127.5);
+      data[target + 2] = 128;
+      data[target + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+    return { url: canvas.toDataURL(), scale: maxDisplacement * 2 };
+  }
+
+  function makeLensFilter(ns, xlink, id, width, height, lens) {
+    var filter = document.createElementNS(ns, "filter");
+    filter.setAttribute("id", id);
+    filter.setAttribute("x", "0");
+    filter.setAttribute("y", "0");
+    filter.setAttribute("width", String(width));
+    filter.setAttribute("height", String(height));
+    filter.setAttribute("filterUnits", "userSpaceOnUse");
+    filter.setAttribute("color-interpolation-filters", "sRGB");
+
+    var image = document.createElementNS(ns, "feImage");
+    image.setAttribute("href", lens.url);
+    image.setAttributeNS(xlink, "xlink:href", lens.url);
+    image.setAttribute("x", "0");
+    image.setAttribute("y", "0");
+    image.setAttribute("width", String(width));
+    image.setAttribute("height", String(height));
+    image.setAttribute("preserveAspectRatio", "none");
+    image.setAttribute("result", "map");
+    filter.appendChild(image);
+
+    // Refract each color channel with a slightly different strength for the
+    // faint chromatic fringe real glass shows at its rim.
+    var rows = {
+      R: "1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0",
+      G: "0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 1 0",
+      B: "0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 1 0"
+    };
+    var scales = { R: lens.scale * 1.1, G: lens.scale, B: lens.scale * 0.9 };
+    var keys = ["R", "G", "B"];
+    for (var index = 0; index < keys.length; index += 1) {
+      var key = keys[index];
+      var displace = document.createElementNS(ns, "feDisplacementMap");
+      displace.setAttribute("in", "SourceGraphic");
+      displace.setAttribute("in2", "map");
+      displace.setAttribute("scale", String(scales[key]));
+      displace.setAttribute("xChannelSelector", "R");
+      displace.setAttribute("yChannelSelector", "G");
+      displace.setAttribute("result", "disp" + key);
+      filter.appendChild(displace);
+      var matrix = document.createElementNS(ns, "feColorMatrix");
+      matrix.setAttribute("in", "disp" + key);
+      matrix.setAttribute("type", "matrix");
+      matrix.setAttribute("values", rows[key]);
+      matrix.setAttribute("result", "chan" + key);
+      filter.appendChild(matrix);
+    }
+    var mergeRG = document.createElementNS(ns, "feComposite");
+    mergeRG.setAttribute("in", "chanR");
+    mergeRG.setAttribute("in2", "chanG");
+    mergeRG.setAttribute("operator", "arithmetic");
+    mergeRG.setAttribute("k1", "0");
+    mergeRG.setAttribute("k2", "1");
+    mergeRG.setAttribute("k3", "1");
+    mergeRG.setAttribute("k4", "0");
+    mergeRG.setAttribute("result", "chanRG");
+    filter.appendChild(mergeRG);
+    var mergeRGB = document.createElementNS(ns, "feComposite");
+    mergeRGB.setAttribute("in", "chanRG");
+    mergeRGB.setAttribute("in2", "chanB");
+    mergeRGB.setAttribute("operator", "arithmetic");
+    mergeRGB.setAttribute("k1", "0");
+    mergeRGB.setAttribute("k2", "1");
+    mergeRGB.setAttribute("k3", "1");
+    mergeRGB.setAttribute("k4", "0");
+    filter.appendChild(mergeRGB);
+    return filter;
+  }
+
+  function buildLens(shadow) {
+    // backdrop-filter:url(#svg) only renders in Chromium; elsewhere the
+    // frosted-glass fallback stays active, so bail out quietly.
+    if (!lensEl || !panel) return;
+    if (!/Chrome\/|Chromium\/|Edg\//.test(navigator.userAgent || "")) return;
+    try {
+      var ns = "http://www.w3.org/2000/svg";
+      var xlink = "http://www.w3.org/1999/xlink";
+      var capsule = buildLensMap(EXPANDED_WIDTH, EXPANDED_HEIGHT, 8, 0.32);
+      var ball = buildLensMap(COLLAPSED_WIDTH, COLLAPSED_HEIGHT, 6, 0.4);
+      var svg = document.createElementNS(ns, "svg");
+      svg.setAttribute("width", "0");
+      svg.setAttribute("height", "0");
+      svg.setAttribute("aria-hidden", "true");
+      svg.setAttribute("style", "position:absolute;width:0;height:0;overflow:hidden;");
+      var defs = document.createElementNS(ns, "defs");
+      defs.appendChild(makeLensFilter(ns, xlink, "ps-lens-capsule", EXPANDED_WIDTH, EXPANDED_HEIGHT, capsule));
+      defs.appendChild(makeLensFilter(ns, xlink, "ps-lens-ball", COLLAPSED_WIDTH, COLLAPSED_HEIGHT, ball));
+      svg.appendChild(defs);
+      shadow.appendChild(svg);
+      lensEl.classList.add("on");
+      lensEl.classList.toggle("ball", collapsed);
+      panel.classList.add("lens-on");
+    } catch (error) {
+      // The refraction lens is a progressive enhancement over frosted glass.
+    }
+  }
+
   function makeButton(action, label, glyph, className) {
     var button = document.createElement("button");
     button.type = "button";
@@ -266,12 +420,18 @@
     var style = document.createElement("style");
     style.textContent = [
       ":host{all:initial;}",
-      ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);}",
-      ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);}",
+      ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-thin:rgba(28,28,32,.3);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);}",
+      ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-thin:rgba(255,255,255,.34);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);}",
       "@supports not ((backdrop-filter:blur(2px)) or (-webkit-backdrop-filter:blur(2px))){.glass-dark{--glass-bg:rgba(28,28,32,.9);--glass-bg-strong:rgba(28,28,32,.95);--chip-bg:rgba(58,58,64,.95);}.glass-light{--glass-bg:rgba(255,255,255,.92);--glass-bg-strong:rgba(255,255,255,.96);--chip-bg:rgba(255,255,255,.96);}}",
       ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid var(--glass-border);border-radius:999px;background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 48%);box-shadow:inset 0 1px 1px var(--rim-top),inset 0 -1px 1px var(--rim-bottom),0 8px 24px var(--shadow-color);backdrop-filter:blur(18px) saturate(180%);-webkit-backdrop-filter:blur(18px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;transition:background-color .25s ease;}",
       ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;border:0;border-radius:0;background:none;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
+      ".lens{position:absolute;inset:0;border-radius:999px;pointer-events:none;display:none;}",
+      ".lens.on{display:block;backdrop-filter:url(#ps-lens-capsule);-webkit-backdrop-filter:url(#ps-lens-capsule);}",
+      ".lens.on.ball{backdrop-filter:url(#ps-lens-ball);-webkit-backdrop-filter:url(#ps-lens-ball);}",
+      ".panel.lens-on{background-color:var(--glass-bg-thin);backdrop-filter:blur(3px) saturate(170%);-webkit-backdrop-filter:blur(3px) saturate(170%);}",
+      ".panel.lens-on.collapsed{background:none;backdrop-filter:none;-webkit-backdrop-filter:none;}",
+      ".panel.lens-on.collapsed .toggle{background-color:var(--glass-bg-thin);backdrop-filter:blur(3px) saturate(170%);-webkit-backdrop-filter:blur(3px) saturate(170%);}",
       ".arrows{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:space-between;}",
       ".panel.collapsed .arrows{display:none;}",
       ".divider{width:14px;height:1px;background:var(--divider);}",
@@ -321,9 +481,9 @@
     arrows.className = "arrows";
     var divider = document.createElement("div");
     divider.className = "divider";
-    arrows.appendChild(makeButton("top", "Scroll to page top", "↑", "arrow"));
+    arrows.appendChild(makeButton("top", "Scroll to page top", "▲", "arrow"));
     arrows.appendChild(divider);
-    arrows.appendChild(makeButton("bottom", "Scroll to page bottom", "↓", "arrow"));
+    arrows.appendChild(makeButton("bottom", "Scroll to page bottom", "▼", "arrow"));
 
     toggleButton = makeButton("toggle", "Collapse page scroll controls", "−", "toggle");
 
@@ -339,10 +499,18 @@
     panel.addEventListener("click", stopEvent, true);
     panel.addEventListener("keydown", onKeyDown, true);
     panel.addEventListener("contextmenu", onPanelContextMenu, true);
+    panel.addEventListener("pointerenter", onPanelPointerEnter);
+    panel.addEventListener("pointerleave", onPanelPointerLeave);
+    panel.addEventListener("focusin", onPanelFocusIn);
+    panel.addEventListener("focusout", onPanelFocusOut);
 
     shadow.appendChild(style);
+    lensEl = document.createElement("div");
+    lensEl.className = "lens";
+    shadow.appendChild(lensEl);
     shadow.appendChild(panel);
     buildSettings(shadow);
+    buildLens(shadow);
   }
 
   function makeSettingsInput() {
@@ -505,6 +673,7 @@
     if (!destroyed && host) {
       applyHostStyle(preferredPosition());
       scheduleGlassUpdate();
+      if (!pointerInside) scheduleAutoCollapse();
     }
   }
 
@@ -701,6 +870,7 @@
     if (!panel || !toggleButton) return;
 
     panel.classList.toggle("collapsed", collapsed);
+    if (lensEl) lensEl.classList.toggle("ball", collapsed);
     panel.setAttribute("aria-label", collapsed ? "Page scroll controls collapsed" : "Page scroll controls");
     var toggleLabel = collapsed ? "Expand page scroll controls" : "Collapse page scroll controls";
     toggleButton.setAttribute("aria-label", toggleLabel);
@@ -710,7 +880,9 @@
     if (settingsOpen) positionSettings();
   }
 
-  function toggleCollapsed() {
+  function setCollapsed(next) {
+    next = !!next;
+    if (collapsed === next) return;
     var oldSize = getHostSize();
     var oldPosition = getHostPosition();
     var center = {
@@ -718,7 +890,7 @@
       y: oldPosition.top + oldSize.height / 2
     };
 
-    collapsed = !collapsed;
+    collapsed = next;
     var newSize = getHostSize();
     currentPosition = clampPosition({
       left: center.x - newSize.width / 2,
@@ -727,6 +899,48 @@
     syncCollapsedState();
     if (manualPositionRatio) rememberManualPosition();
     scheduleGlassUpdate();
+  }
+
+  function toggleCollapsed() {
+    clearLingerTimer();
+    setCollapsed(!collapsed);
+  }
+
+  function clearLingerTimer() {
+    if (lingerTimer) {
+      window.clearTimeout(lingerTimer);
+      lingerTimer = null;
+    }
+  }
+
+  function scheduleAutoCollapse() {
+    clearLingerTimer();
+    if (destroyed || collapsed) return;
+    lingerTimer = window.setTimeout(function () {
+      lingerTimer = null;
+      if (destroyed || collapsed || drag || settingsOpen || pointerInside) return;
+      setCollapsed(true);
+    }, EXPAND_LINGER_MS);
+  }
+
+  function onPanelPointerEnter() {
+    pointerInside = true;
+    clearLingerTimer();
+    if (!destroyed && collapsed) setCollapsed(false);
+  }
+
+  function onPanelPointerLeave() {
+    pointerInside = false;
+    scheduleAutoCollapse();
+  }
+
+  function onPanelFocusIn() {
+    clearLingerTimer();
+    if (!destroyed && collapsed) setCollapsed(false);
+  }
+
+  function onPanelFocusOut() {
+    if (!pointerInside) scheduleAutoCollapse();
   }
 
   function getHostPosition() {
@@ -761,11 +975,13 @@
 
   function destroyControls() {
     destroyed = true;
-    collapsed = false;
+    collapsed = true;
     drag = null;
+    pointerInside = false;
     manualPositionRatio = null;
     previewRatio = null;
     settingsOpen = false;
+    clearLingerTimer();
     if (ensureTimer) window.clearInterval(ensureTimer);
     if (glassUpdateTimer) {
       window.clearTimeout(glassUpdateTimer);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.11.1
+// @version      0.11.2
 // @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Right-click to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -256,8 +256,10 @@
     return anchorSizeChange(expandedSize, expandedBox, getHostSize());
   }
 
-  function rememberManualPosition() {
-    manualPositionRatio = positionToRatio(getHostPosition());
+  function rememberManualPosition(position) {
+    // Position must be the logical target: reading the rect mid-morph would
+    // capture a stale animated position and make the keep-alive re-apply it.
+    manualPositionRatio = positionToRatio(position || getHostPosition());
   }
 
   function applyHostStyle(position) {
@@ -650,7 +652,7 @@
   }
 
   function readSettingsInputs() {
-    var current = centerRatioFromPosition(getHostPosition());
+    var current = centerRatioFromPosition(currentPosition || getHostPosition());
     var x = settingsInputX ? parseFloat(settingsInputX.value) : NaN;
     var y = settingsInputY ? parseFloat(settingsInputY.value) : NaN;
     return {
@@ -661,7 +663,7 @@
 
   function syncSettingsInputs() {
     if (!settingsInputX || !settingsInputY) return;
-    var ratio = centerRatioFromPosition(getHostPosition());
+    var ratio = centerRatioFromPosition(currentPosition || getHostPosition());
     settingsInputX.value = String(Math.round(ratio.x * 100));
     settingsInputY.value = String(Math.round(ratio.y * 100));
   }
@@ -670,7 +672,7 @@
     if (!settingsEl || !settingsOpen) return;
     var size = getHostSize();
     var viewport = getViewportSize();
-    var hostPosition = getHostPosition();
+    var hostPosition = currentPosition || getHostPosition();
     var rect = settingsEl.getBoundingClientRect();
     var width = rect.width || 208;
     var height = rect.height || 170;
@@ -934,7 +936,7 @@
     collapsed = next;
     currentPosition = anchorSizeChange(oldSize, oldPosition, getHostSize());
     syncCollapsedState();
-    if (manualPositionRatio) rememberManualPosition();
+    if (manualPositionRatio) rememberManualPosition(currentPosition);
     scheduleGlassUpdate();
   }
 
@@ -1041,7 +1043,7 @@
   }
 
   function saveCurrentPositionAsDefault() {
-    persistDefaultRatio(centerRatioFromPosition(getHostPosition()));
+    persistDefaultRatio(centerRatioFromPosition(currentPosition || getHostPosition()));
     manualPositionRatio = null;
     previewRatio = null;
     if (!destroyed && host) applyHostStyle(preferredPosition());

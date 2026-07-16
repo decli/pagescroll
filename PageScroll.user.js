@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.8.0
-// @description  Slim draggable capsule with floating arrows for fast page top/bottom scrolling. Hover reveals collapse/close; right-click the widget to configure its default position. Supports SPA pages with custom scroll containers.
+// @version      0.9.0
+// @description  Slim draggable liquid-glass capsule for fast page top/bottom scrolling. The frosted material adapts to the page behind it; hover reveals collapse/close; right-click the widget to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
 // @match        *://*/*
@@ -52,6 +52,8 @@
   var settingsInputX = null;
   var settingsInputY = null;
   var settingsOpen = false;
+  var glassLight = false;
+  var glassUpdateTimer = null;
 
   function getHostSize() {
     if (collapsed) return { width: COLLAPSED_WIDTH, height: COLLAPSED_HEIGHT };
@@ -264,50 +266,53 @@
     var style = document.createElement("style");
     style.textContent = [
       ":host{all:initial;}",
-      ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(24,24,27,.88);box-shadow:0 6px 20px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
-      ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
+      ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);}",
+      ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);}",
+      "@supports not ((backdrop-filter:blur(2px)) or (-webkit-backdrop-filter:blur(2px))){.glass-dark{--glass-bg:rgba(28,28,32,.9);--glass-bg-strong:rgba(28,28,32,.95);--chip-bg:rgba(58,58,64,.95);}.glass-light{--glass-bg:rgba(255,255,255,.92);--glass-bg-strong:rgba(255,255,255,.96);--chip-bg:rgba(255,255,255,.96);}}",
+      ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid var(--glass-border);border-radius:999px;background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 48%);box-shadow:inset 0 1px 1px var(--rim-top),inset 0 -1px 1px var(--rim-bottom),0 8px 24px var(--shadow-color);backdrop-filter:blur(18px) saturate(180%);-webkit-backdrop-filter:blur(18px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;transition:background-color .25s ease;}",
+      ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;border:0;border-radius:0;background:none;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
       ".arrows{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:space-between;}",
       ".panel.collapsed .arrows{display:none;}",
-      ".divider{width:14px;height:1px;background:rgba(255,255,255,.16);}",
-      "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;padding:0;font-family:Arial,Helvetica,sans-serif;line-height:1;display:grid;place-items:center;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;}",
-      ".arrow{width:24px;height:24px;border-radius:999px;background:transparent;color:rgba(248,250,252,.92);font-size:14px;font-weight:800;}",
-      ".arrow:hover{background:#38bdf8;color:#001018;}",
-      ".close,.toggle{position:absolute;left:50%;z-index:1;width:16px;height:16px;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:rgba(24,24,27,.94);color:#f8fafc;font-size:10px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.3);opacity:0;transform:translateX(-50%) scale(.5);pointer-events:none;transition:opacity .16s ease,transform .16s ease,background .16s ease,color .16s ease;}",
+      ".divider{width:14px;height:1px;background:var(--divider);}",
+      "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1;display:grid;place-items:center;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;}",
+      ".arrow{width:24px;height:24px;border-radius:999px;background:transparent;color:var(--ink);font-size:14px;font-weight:800;transition:background-color .15s ease,color .15s ease;}",
+      ".arrow:hover{background:var(--hover-bg);}",
+      ".close,.toggle{position:absolute;left:50%;z-index:1;width:16px;height:16px;border-radius:999px;border:1px solid var(--glass-border);background-color:var(--chip-bg);color:var(--ink);font-size:10px;font-weight:700;box-shadow:inset 0 1px 1px var(--rim-top),0 2px 8px var(--shadow-color);backdrop-filter:blur(12px) saturate(180%);-webkit-backdrop-filter:blur(12px) saturate(180%);opacity:0;transform:translateX(-50%) scale(.5);pointer-events:none;transition:opacity .16s ease,transform .16s ease,background-color .16s ease,color .16s ease;}",
       ".close{top:-8px;}",
       ".toggle{bottom:-8px;}",
       ".panel:hover .close,.panel:focus-within .close,.panel:hover .toggle,.panel:focus-within .toggle{opacity:1;transform:translateX(-50%) scale(1);pointer-events:auto;}",
       "@media (hover:none){.close,.toggle{opacity:1;transform:translateX(-50%) scale(1);pointer-events:auto;}}",
-      ".toggle:hover{background:#38bdf8;border-color:transparent;color:#001018;}",
-      ".close:hover{background:rgba(248,113,113,.96);border-color:transparent;color:#111827;}",
-      ".panel.collapsed .toggle{position:static;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:1px solid rgba(255,255,255,.18);background:rgba(24,24,27,.92);font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.24);}",
-      ".panel.collapsed .toggle:hover{background:#38bdf8;color:#001018;}",
+      ".toggle:hover{background-color:rgba(10,132,255,.92);border-color:transparent;color:#fff;}",
+      ".close:hover{background-color:rgba(255,69,58,.92);border-color:transparent;color:#fff;}",
+      ".panel.collapsed .toggle{position:static;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:1px solid var(--glass-border);background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 55%);font-size:12px;box-shadow:inset 0 1px 1px var(--rim-top),0 4px 14px var(--shadow-color);backdrop-filter:blur(14px) saturate(180%);-webkit-backdrop-filter:blur(14px) saturate(180%);}",
+      ".panel.collapsed .toggle:hover{background-color:var(--chip-hover);border-color:var(--glass-border);color:var(--ink);}",
       ".panel.collapsed .close{display:none;}",
       ".arrow:active{transform:translateY(1px);}",
       ".close:active,.toggle:active{transform:translateX(-50%) scale(.92);}",
-      ".panel.collapsed .toggle:active{transform:scale(.92);}",
+      ".panel.collapsed .toggle:active{transform:scale(.94);}",
       ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}",
-      ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(24,24,27,.96);box-shadow:0 12px 32px rgba(0,0,0,.4);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#f8fafc;cursor:default;user-select:none;-webkit-user-select:none;}",
+      ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid var(--glass-border);border-radius:14px;background-color:var(--glass-bg-strong);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 40%);box-shadow:inset 0 1px 1px var(--rim-top),0 12px 32px var(--shadow-color);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:12px;color:var(--ink);cursor:default;user-select:none;-webkit-user-select:none;}",
       ".settings.open{display:flex;}",
       ".settings-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;}",
-      ".settings-close{width:16px;height:16px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:10px;font-weight:700;}",
-      ".settings-close:hover{background:rgba(248,113,113,.96);color:#111827;}",
+      ".settings-close{width:16px;height:16px;border-radius:999px;border:1px solid var(--glass-border);background:var(--chip-bg);color:var(--ink);font-size:10px;font-weight:700;}",
+      ".settings-close:hover{background:rgba(255,69,58,.92);border-color:transparent;color:#fff;}",
       ".settings-row{display:flex;align-items:center;justify-content:space-between;gap:6px;}",
-      ".settings-row label{color:rgba(248,250,252,.85);}",
+      ".settings-row label{color:var(--ink-dim);}",
       ".settings-field{display:flex;align-items:center;gap:4px;}",
-      ".settings-field span{color:rgba(248,250,252,.6);font-size:11px;}",
-      ".settings-row input{width:64px;box-sizing:border-box;padding:4px 6px;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:rgba(255,255,255,.08);color:#f8fafc;font-size:12px;font-family:inherit;outline:none;user-select:text;-webkit-user-select:text;}",
-      ".settings-row input:focus{border-color:#38bdf8;}",
-      ".settings-hint{color:rgba(248,250,252,.55);font-size:11px;line-height:1.5;}",
+      ".settings-field span{color:var(--ink-faint);font-size:11px;}",
+      ".settings-row input{width:64px;box-sizing:border-box;padding:4px 6px;border:1px solid var(--field-border);border-radius:6px;background:var(--field-bg);color:var(--ink);font-size:12px;font-family:inherit;outline:none;user-select:text;-webkit-user-select:text;}",
+      ".settings-row input:focus{border-color:#0a84ff;}",
+      ".settings-hint{color:var(--ink-faint);font-size:11px;line-height:1.5;}",
       ".settings-actions{display:flex;justify-content:flex-end;gap:6px;}",
-      ".settings-actions button{padding:5px 9px;border-radius:6px;background:rgba(255,255,255,.12);color:#f8fafc;font-size:11px;font-weight:600;}",
-      ".settings-actions button:hover{background:rgba(255,255,255,.22);}",
-      ".settings-actions button.primary{background:#38bdf8;color:#001018;}",
-      ".settings-actions button.primary:hover{background:#7dd3fc;}"
+      ".settings-actions button{padding:5px 9px;border-radius:6px;border:1px solid var(--glass-border);background:var(--chip-bg);color:var(--ink);font-size:11px;font-weight:600;}",
+      ".settings-actions button:hover{background:var(--chip-hover);}",
+      ".settings-actions button.primary{background:#0a84ff;border-color:transparent;color:#fff;}",
+      ".settings-actions button.primary:hover{background:#3395ff;}"
     ].join("");
 
     panel = document.createElement("div");
-    panel.className = "panel";
+    panel.className = "panel glass-dark";
     panel.setAttribute("role", "group");
     panel.setAttribute("aria-label", "Page scroll controls");
     panel.title = "拖动调整位置，右键打开设置";
@@ -367,7 +372,7 @@
 
   function buildSettings(shadow) {
     settingsEl = document.createElement("div");
-    settingsEl.className = "settings";
+    settingsEl.className = "settings glass-dark";
     settingsEl.setAttribute("role", "dialog");
     settingsEl.setAttribute("aria-label", "PageScroll position settings");
 
@@ -476,6 +481,7 @@
   function onSettingsInput() {
     previewRatio = readSettingsInputs();
     if (!destroyed && host) applyHostStyle(positionFromCenterRatio(previewRatio));
+    scheduleGlassUpdate();
   }
 
   function openSettings() {
@@ -496,7 +502,10 @@
     settingsOpen = false;
     previewRatio = null;
     if (settingsEl) settingsEl.classList.remove("open");
-    if (!destroyed && host) applyHostStyle(preferredPosition());
+    if (!destroyed && host) {
+      applyHostStyle(preferredPosition());
+      scheduleGlassUpdate();
+    }
   }
 
   function saveSettings() {
@@ -518,6 +527,71 @@
     event.preventDefault();
     event.stopPropagation();
     if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+  }
+
+  function parseCssColor(value) {
+    if (!value) return null;
+    var match = /rgba?\(([^)]+)\)/.exec(String(value));
+    if (!match) return null;
+    var parts = match[1].split(/[\s,\/]+/).filter(Boolean);
+    var r = parseFloat(parts[0]);
+    var g = parseFloat(parts[1]);
+    var b = parseFloat(parts[2]);
+    if (!isFinite(r) || !isFinite(g) || !isFinite(b)) return null;
+    var a = parts.length > 3 ? parseFloat(parts[3]) : 1;
+    if (!isFinite(a)) a = 1;
+    return { r: r, g: g, b: b, a: Math.min(1, Math.max(0, a)) };
+  }
+
+  function backdropIsLight() {
+    try {
+      if (typeof document.elementsFromPoint !== "function" || !host || !host.isConnected) return glassLight;
+      var rect = host.getBoundingClientRect();
+      var viewport = getViewportSize();
+      var x = Math.min(Math.max(rect.left + rect.width / 2, 0), Math.max(0, viewport.width - 1));
+      var y = Math.min(Math.max(rect.top + rect.height / 2, 0), Math.max(0, viewport.height - 1));
+      var stack = document.elementsFromPoint(x, y);
+      var layers = [];
+      for (var index = 0; index < stack.length; index += 1) {
+        if (stack[index] === host) continue;
+        var color = parseCssColor(window.getComputedStyle(stack[index]).backgroundColor);
+        if (color && color.a > 0) layers.push(color);
+      }
+      // Composite the visible background stack bottom-up over an assumed
+      // white canvas, then classify by perceived luminance.
+      var luminance = 1;
+      for (var back = layers.length - 1; back >= 0; back -= 1) {
+        var layer = layers[back];
+        var own = (0.299 * layer.r + 0.587 * layer.g + 0.114 * layer.b) / 255;
+        luminance = layer.a * own + (1 - layer.a) * luminance;
+      }
+      return luminance >= 0.55;
+    } catch (error) {
+      return glassLight;
+    }
+  }
+
+  function updateGlassScheme() {
+    if (destroyed || !host || !panel) return;
+    glassLight = backdropIsLight();
+    panel.classList.toggle("glass-light", glassLight);
+    panel.classList.toggle("glass-dark", !glassLight);
+    if (settingsEl) {
+      settingsEl.classList.toggle("glass-light", glassLight);
+      settingsEl.classList.toggle("glass-dark", !glassLight);
+    }
+  }
+
+  function scheduleGlassUpdate() {
+    if (glassUpdateTimer || destroyed) return;
+    glassUpdateTimer = window.setTimeout(function () {
+      glassUpdateTimer = null;
+      updateGlassScheme();
+    }, 180);
+  }
+
+  function onAnyScroll() {
+    scheduleGlassUpdate();
   }
 
   function actionFromEvent(event) {
@@ -584,6 +658,7 @@
 
     if (completed.moved) {
       rememberManualPosition();
+      scheduleGlassUpdate();
       if (settingsOpen) {
         previewRatio = null;
         syncSettingsInputs();
@@ -651,6 +726,7 @@
     });
     syncCollapsedState();
     if (manualPositionRatio) rememberManualPosition();
+    scheduleGlassUpdate();
   }
 
   function getHostPosition() {
@@ -671,6 +747,7 @@
     }
     if (!host.isConnected || host.parentNode !== parent) parent.appendChild(host);
     installObserver();
+    updateGlassScheme();
   }
 
   function installObserver() {
@@ -690,14 +767,20 @@
     previewRatio = null;
     settingsOpen = false;
     if (ensureTimer) window.clearInterval(ensureTimer);
+    if (glassUpdateTimer) {
+      window.clearTimeout(glassUpdateTimer);
+      glassUpdateTimer = null;
+    }
     if (observer) observer.disconnect();
     if (host && host.parentNode) host.parentNode.removeChild(host);
     window.removeEventListener("resize", onResize, true);
+    window.removeEventListener("scroll", onAnyScroll, true);
   }
 
   function onResize() {
     if (!host || destroyed) return;
     applyHostStyle(preferredPosition());
+    updateGlassScheme();
     if (settingsOpen) {
       syncSettingsInputs();
       positionSettings();
@@ -927,6 +1010,7 @@
   mountHost();
   ensureTimer = window.setInterval(mountHost, 1000);
   window.addEventListener("resize", onResize, true);
+  window.addEventListener("scroll", onAnyScroll, { capture: true, passive: true });
   document.addEventListener("DOMContentLoaded", mountHost, { once: true, capture: true });
   window.addEventListener("load", mountHost, { once: true, capture: true });
   registerMenuCommands();

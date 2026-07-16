@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.11.0
+// @version      0.11.1
 // @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Right-click to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -485,7 +485,7 @@
       "@media (hover:none){.close,.toggle{opacity:1;transform:translateX(-50%) scale(1);pointer-events:auto;}}",
       ".toggle:hover{background-color:rgba(10,132,255,.92);border-color:transparent;color:#fff;}",
       ".close:hover{background-color:rgba(255,69,58,.92);border-color:transparent;color:#fff;}",
-      ".panel.collapsed .toggle{position:absolute;left:0;top:0;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:0;background:transparent;box-shadow:none;font-size:12px;transition:opacity .16s ease .1s;}",
+      ".panel.collapsed .toggle{position:absolute;left:0;top:0;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:0;background:transparent;box-shadow:none;font-size:8px;line-height:1.15;white-space:pre;text-align:center;transition:opacity .16s ease .1s;}",
       ".panel.collapsed .toggle:hover{background-color:var(--hover-bg);color:var(--ink);}",
       ".panel.collapsed .close{display:none;}",
       ".arrow:active{transform:translateY(1px);}",
@@ -916,7 +916,7 @@
     var toggleLabel = collapsed ? "Expand page scroll controls" : "Collapse page scroll controls";
     toggleButton.setAttribute("aria-label", toggleLabel);
     toggleButton.title = toggleLabel;
-    toggleButton.textContent = collapsed ? "↕" : "−";
+    toggleButton.textContent = collapsed ? "▲\n▼" : "−";
     applyHostStyle(currentPosition || defaultPosition());
     if (settingsOpen) positionSettings();
   }

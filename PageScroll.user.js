@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.7.0
-// @description  Compact draggable floating arrows for fast page top/bottom scrolling. Right-click the widget to configure its default position. Supports SPA pages with custom scroll containers.
+// @version      0.8.0
+// @description  Slim draggable capsule with floating arrows for fast page top/bottom scrolling. Hover reveals collapse/close; right-click the widget to configure its default position. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
 // @match        *://*/*
@@ -27,8 +27,8 @@
 
   var HOST_ID = "page-scroll-floating-arrows-" + Math.random().toString(36).slice(2);
   var Z_INDEX = "2147483647";
-  var EXPANDED_WIDTH = 50;
-  var EXPANDED_HEIGHT = 50;
+  var EXPANDED_WIDTH = 34;
+  var EXPANDED_HEIGHT = 72;
   var COLLAPSED_WIDTH = 26;
   var COLLAPSED_HEIGHT = 26;
   var EDGE_MARGIN = 8;
@@ -264,24 +264,28 @@
     var style = document.createElement("style");
     style.textContent = [
       ":host{all:initial;}",
-      ".panel{width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:1px solid rgba(255,255,255,.18);border-radius:13px;background:rgba(24,24,27,.88);box-shadow:0 6px 20px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
-      ".panel.collapsed{position:relative;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
+      ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(24,24,27,.88);box-shadow:0 6px 20px rgba(0,0,0,.28);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;}",
+      ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;filter:none;backdrop-filter:none;-webkit-backdrop-filter:none;display:block;overflow:visible;}",
       ".panel.dragging{cursor:grabbing;opacity:.92;}",
-      ".topbar{display:flex;align-items:center;gap:4px;opacity:.55;transition:opacity .12s ease;}",
-      ".panel:hover .topbar,.panel:focus-within .topbar{opacity:1;}",
-      ".panel.collapsed .topbar{position:absolute;top:0;right:0;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;justify-content:center;opacity:1;}",
-      ".arrows{display:flex;align-items:center;gap:4px;}",
+      ".arrows{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:space-between;}",
       ".panel.collapsed .arrows{display:none;}",
+      ".divider{width:14px;height:1px;background:rgba(255,255,255,.16);}",
       "button{appearance:none;-webkit-appearance:none;box-sizing:border-box;margin:0;border:0;padding:0;font-family:Arial,Helvetica,sans-serif;line-height:1;display:grid;place-items:center;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;}",
-      ".toggle,.close{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;font-size:11px;font-weight:700;}",
-      ".toggle:hover{background:#38bdf8;color:#001018;}",
-      ".close:hover{background:rgba(248,113,113,.96);color:#111827;}",
-      ".panel.collapsed .toggle{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;background:rgba(24,24,27,.92);border:1px solid rgba(255,255,255,.18);font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.24);}",
+      ".arrow{width:24px;height:24px;border-radius:999px;background:transparent;color:rgba(248,250,252,.92);font-size:14px;font-weight:800;}",
+      ".arrow:hover{background:#38bdf8;color:#001018;}",
+      ".close,.toggle{position:absolute;left:50%;z-index:1;width:16px;height:16px;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:rgba(24,24,27,.94);color:#f8fafc;font-size:10px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.3);opacity:0;transform:translateX(-50%) scale(.5);pointer-events:none;transition:opacity .16s ease,transform .16s ease,background .16s ease,color .16s ease;}",
+      ".close{top:-8px;}",
+      ".toggle{bottom:-8px;}",
+      ".panel:hover .close,.panel:focus-within .close,.panel:hover .toggle,.panel:focus-within .toggle{opacity:1;transform:translateX(-50%) scale(1);pointer-events:auto;}",
+      "@media (hover:none){.close,.toggle{opacity:1;transform:translateX(-50%) scale(1);pointer-events:auto;}}",
+      ".toggle:hover{background:#38bdf8;border-color:transparent;color:#001018;}",
+      ".close:hover{background:rgba(248,113,113,.96);border-color:transparent;color:#111827;}",
+      ".panel.collapsed .toggle{position:static;width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;opacity:1;pointer-events:auto;transform:none;border:1px solid rgba(255,255,255,.18);background:rgba(24,24,27,.92);font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.24);}",
       ".panel.collapsed .toggle:hover{background:#38bdf8;color:#001018;}",
       ".panel.collapsed .close{display:none;}",
-      ".arrow{width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.95);color:#111827;font-size:13px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.2);}",
-      ".arrow:hover{background:#38bdf8;color:#001018;}",
-      ".arrow:active,.toggle:active,.close:active{transform:translateY(1px);}",
+      ".arrow:active{transform:translateY(1px);}",
+      ".close:active,.toggle:active{transform:translateX(-50%) scale(.92);}",
+      ".panel.collapsed .toggle:active{transform:scale(.92);}",
       ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}",
       ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(24,24,27,.96);box-shadow:0 12px 32px rgba(0,0,0,.4);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#f8fafc;cursor:default;user-select:none;-webkit-user-select:none;}",
       ".settings.open{display:flex;}",
@@ -308,19 +312,19 @@
     panel.setAttribute("aria-label", "Page scroll controls");
     panel.title = "拖动调整位置，右键打开设置";
 
-    var topbar = document.createElement("div");
-    topbar.className = "topbar";
-    toggleButton = makeButton("toggle", "Collapse page scroll controls", "−", "toggle");
-    topbar.appendChild(makeButton("close", "Close page scroll controls until reload", "×", "close"));
-    topbar.appendChild(toggleButton);
-
     var arrows = document.createElement("div");
     arrows.className = "arrows";
+    var divider = document.createElement("div");
+    divider.className = "divider";
     arrows.appendChild(makeButton("top", "Scroll to page top", "↑", "arrow"));
+    arrows.appendChild(divider);
     arrows.appendChild(makeButton("bottom", "Scroll to page bottom", "↓", "arrow"));
 
-    panel.appendChild(topbar);
+    toggleButton = makeButton("toggle", "Collapse page scroll controls", "−", "toggle");
+
     panel.appendChild(arrows);
+    panel.appendChild(toggleButton);
+    panel.appendChild(makeButton("close", "Close page scroll controls until reload", "×", "close"));
     syncCollapsedState();
 
     panel.addEventListener("pointerdown", onPointerDown, true);

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.12.0
-// @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Right-click to configure its default position. Supports SPA pages with custom scroll containers.
+// @version      0.13.0
+// @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Double-tap ↑ / ↓ (customizable) to jump to the top / bottom. Right-click to configure its default position and shortcuts. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
 // @match        *://*/*
@@ -39,6 +39,29 @@
   var DEFAULT_RIGHT_GAP = 16;
   var DEFAULT_VERTICAL_RATIO = 0.2;
   var STORAGE_KEY = "pagescroll:default-position";
+  var HOTKEY_STORAGE_KEY = "pagescroll:hotkeys";
+  var DEFAULT_HOTKEY_INTERVAL = 350;
+  var MIN_HOTKEY_INTERVAL = 150;
+  var MAX_HOTKEY_INTERVAL = 1000;
+  var HOTKEY_HINT = "连按两次触发。点按键框后按下新按键即可修改，Esc 取消；在输入框、可编辑区域内不触发。";
+  var IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+  // Keys that can't stand alone as a shortcut: modifiers, locks, and the
+  // placeholders browsers report for IME/dead-key input.
+  var UNBINDABLE_KEYS = {
+    Shift: true, Control: true, Alt: true, AltGraph: true, Meta: true, OS: true, Super: true, Hyper: true,
+    Fn: true, FnLock: true, CapsLock: true, NumLock: true, ScrollLock: true, Symbol: true, SymbolLock: true,
+    Unidentified: true, Dead: true, Process: true
+  };
+  var KEY_ALIASES = { Up: "ArrowUp", Down: "ArrowDown", Left: "ArrowLeft", Right: "ArrowRight", Spacebar: " ", Esc: "Escape", Del: "Delete" };
+  var KEY_LABELS = { ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", " ": "Space", Escape: "Esc" };
+  // Focus inside these already owns the keyboard (text entry, media seek,
+  // ARIA widgets that navigate with arrows), so shortcuts stay out of it.
+  var KEY_OWNER_SELECTOR = [
+    "input", "textarea", "select", "video", "audio",
+    "[role=textbox]", "[role=searchbox]", "[role=combobox]", "[role=listbox]", "[role=slider]",
+    "[role=spinbutton]", "[role=menu]", "[role=menubar]", "[role=tree]", "[role=treegrid]",
+    "[role=grid]", "[role=radiogroup]", "[role=tablist]"
+  ].join(",");
 
   var host = null;
   var panel = null;
@@ -56,6 +79,17 @@
   var settingsInputX = null;
   var settingsInputY = null;
   var settingsOpen = false;
+  var settingsPositionDirty = false;
+  var settingsHotkeySwitch = null;
+  var settingsKeyButtons = {};
+  var settingsInputInterval = null;
+  var settingsHotkeyHint = null;
+  var hotkeyConfig = null;
+  var hotkeyDraft = null;
+  var hotkeyPending = null;
+  var recordingAction = null;
+  var recordFinishedAt = 0;
+  var lastPointerTarget = null;
   var glassLight = false;
   var glassUpdateTimer = null;
   var lensEl = null;
@@ -154,6 +188,99 @@
   function persistDefaultRatio(ratio) {
     savedDefaultRatio = { x: clamp01(ratio.x), y: clamp01(ratio.y) };
     writeStorage(STORAGE_KEY, JSON.stringify(savedDefaultRatio));
+  }
+
+  function makeCombo(key) {
+    return { key: key, ctrl: false, alt: false, shift: false, meta: false };
+  }
+
+  function defaultHotkeys() {
+    return {
+      enabled: true,
+      top: makeCombo("ArrowUp"),
+      bottom: makeCombo("ArrowDown"),
+      interval: DEFAULT_HOTKEY_INTERVAL
+    };
+  }
+
+  function cloneHotkeys(config) {
+    return {
+      enabled: config.enabled,
+      top: sanitizeCombo(config.top),
+      bottom: sanitizeCombo(config.bottom),
+      interval: config.interval
+    };
+  }
+
+  // Letters are stored upper-case so Caps Lock doesn't change the match;
+  // Shift is tracked as its own modifier instead.
+  function normalizeKey(key) {
+    if (typeof key !== "string" || !key || key.length > 32) return null;
+    key = KEY_ALIASES[key] || key;
+    if (UNBINDABLE_KEYS[key]) return null;
+    return key.length === 1 ? key.toUpperCase() : key;
+  }
+
+  function sanitizeCombo(value, fallback) {
+    var key = value ? normalizeKey(value.key) : null;
+    if (!key) return fallback || null;
+    return { key: key, ctrl: !!value.ctrl, alt: !!value.alt, shift: !!value.shift, meta: !!value.meta };
+  }
+
+  function comboFromEvent(event) {
+    var key = event.key;
+    // ⌥ turns letters and digits into symbols or dead keys on macOS
+    // (⌥K → ˚); use the physical key so the shortcut reads and matches as ⌥K.
+    if (IS_MAC && event.altKey && /^(Key[A-Z]|Digit[0-9])$/.test(event.code || "")) key = event.code.slice(-1);
+    key = normalizeKey(key);
+    if (!key) return null;
+    return { key: key, ctrl: !!event.ctrlKey, alt: !!event.altKey, shift: !!event.shiftKey, meta: !!event.metaKey };
+  }
+
+  function sameCombo(a, b) {
+    return !!a && !!b && a.key === b.key && a.ctrl === b.ctrl && a.alt === b.alt && a.shift === b.shift && a.meta === b.meta;
+  }
+
+  function comboLabel(combo) {
+    if (!combo) return "";
+    var modifiers = IS_MAC
+      ? (combo.ctrl ? "⌃" : "") + (combo.alt ? "⌥" : "") + (combo.shift ? "⇧" : "") + (combo.meta ? "⌘" : "")
+      : (combo.ctrl ? "Ctrl+" : "") + (combo.alt ? "Alt+" : "") + (combo.shift ? "Shift+" : "") + (combo.meta ? "Win+" : "");
+    return modifiers + (KEY_LABELS[combo.key] || combo.key);
+  }
+
+  function clampInterval(value) {
+    var number = Math.round(Number(value));
+    if (!isFinite(number)) return DEFAULT_HOTKEY_INTERVAL;
+    return Math.min(MAX_HOTKEY_INTERVAL, Math.max(MIN_HOTKEY_INTERVAL, number));
+  }
+
+  function loadHotkeys() {
+    var config = defaultHotkeys();
+    var raw = readStorage(HOTKEY_STORAGE_KEY);
+    if (!raw) return config;
+    try {
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        var top = sanitizeCombo(parsed.top, config.top);
+        var bottom = sanitizeCombo(parsed.bottom, config.bottom);
+        if (!sameCombo(top, bottom)) {
+          config.top = top;
+          config.bottom = bottom;
+        }
+        config.enabled = parsed.enabled !== false;
+        if (parsed.interval !== undefined) config.interval = clampInterval(parsed.interval);
+      }
+    } catch (error) {
+      // Corrupt config falls back to the built-in arrow-key shortcuts.
+    }
+    return config;
+  }
+
+  function persistHotkeys(config) {
+    hotkeyConfig = cloneHotkeys(config);
+    hotkeyPending = null;
+    writeStorage(HOTKEY_STORAGE_KEY, JSON.stringify(hotkeyConfig));
   }
 
   function getPositionRange(size) {
@@ -467,8 +594,8 @@
     var style = document.createElement("style");
     style.textContent = [
       ":host{all:initial;}",
-      ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-thin:rgba(28,28,32,.3);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);--beacon-glow:rgba(255,255,255,.42);--beacon-core:rgba(255,255,255,.16);}",
-      ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-thin:rgba(255,255,255,.34);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);--beacon-glow:rgba(10,132,255,.32);--beacon-core:rgba(10,132,255,.1);}",
+      ".glass-dark{--glass-bg:rgba(28,28,32,.42);--glass-bg-thin:rgba(28,28,32,.3);--glass-bg-strong:rgba(28,28,32,.7);--glass-border:rgba(255,255,255,.22);--sheen:rgba(255,255,255,.14);--rim-top:rgba(255,255,255,.32);--rim-bottom:rgba(255,255,255,.09);--shadow-color:rgba(0,0,0,.45);--ink:#f5f5f7;--ink-dim:rgba(245,245,247,.82);--ink-faint:rgba(245,245,247,.56);--divider:rgba(255,255,255,.22);--chip-bg:rgba(66,66,72,.66);--chip-hover:rgba(255,255,255,.24);--hover-bg:rgba(255,255,255,.16);--field-bg:rgba(255,255,255,.1);--field-border:rgba(255,255,255,.24);--beacon-glow:rgba(255,255,255,.42);--beacon-core:rgba(255,255,255,.16);--danger:#ff6961;}",
+      ".glass-light{--glass-bg:rgba(255,255,255,.46);--glass-bg-thin:rgba(255,255,255,.34);--glass-bg-strong:rgba(255,255,255,.75);--glass-border:rgba(255,255,255,.66);--sheen:rgba(255,255,255,.6);--rim-top:rgba(255,255,255,.9);--rim-bottom:rgba(255,255,255,.35);--shadow-color:rgba(30,42,68,.22);--ink:#1d1d1f;--ink-dim:rgba(29,29,31,.78);--ink-faint:rgba(29,29,31,.55);--divider:rgba(29,29,31,.16);--chip-bg:rgba(255,255,255,.74);--chip-hover:rgba(255,255,255,.95);--hover-bg:rgba(29,29,31,.08);--field-bg:rgba(255,255,255,.55);--field-border:rgba(29,29,31,.18);--beacon-glow:rgba(10,132,255,.32);--beacon-core:rgba(10,132,255,.1);--danger:#d70015;}",
       "@supports not ((backdrop-filter:blur(2px)) or (-webkit-backdrop-filter:blur(2px))){.glass-dark{--glass-bg:rgba(28,28,32,.9);--glass-bg-strong:rgba(28,28,32,.95);--chip-bg:rgba(58,58,64,.95);}.glass-light{--glass-bg:rgba(255,255,255,.92);--glass-bg-strong:rgba(255,255,255,.96);--chip-bg:rgba(255,255,255,.96);}}",
       ".panel{position:relative;width:" + EXPANDED_WIDTH + "px;height:" + EXPANDED_HEIGHT + "px;box-sizing:border-box;padding:5px;display:flex;align-items:center;justify-content:center;border:1px solid var(--glass-border);border-radius:999px;background-color:var(--glass-bg);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 48%);box-shadow:inset 0 1px 1px var(--rim-top),inset 0 -1px 1px var(--rim-bottom),0 8px 24px var(--shadow-color);backdrop-filter:blur(18px) saturate(180%);-webkit-backdrop-filter:blur(18px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;cursor:grab;transition:width .28s " + MORPH_EASE + ",height .28s " + MORPH_EASE + ",padding .28s " + MORPH_EASE + ",background-color .25s ease;}",
       ".panel.collapsed{width:" + COLLAPSED_WIDTH + "px;height:" + COLLAPSED_HEIGHT + "px;padding:0;}",
@@ -500,7 +627,7 @@
       ".panel.collapsed .toggle:active{transform:scale(.94);}",
       ".arrow:focus-visible,.toggle:focus-visible,.close:focus-visible{outline:2px solid #facc15;outline-offset:2px;}",
       "@media (prefers-reduced-motion:reduce){.panel,.arrows,.close,.toggle{transition:none;}.panel.collapsed.beacon::after{animation:none;opacity:0;}}",
-      ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid var(--glass-border);border-radius:14px;background-color:var(--glass-bg-strong);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 40%);box-shadow:inset 0 1px 1px var(--rim-top),0 12px 32px var(--shadow-color);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:12px;color:var(--ink);cursor:default;user-select:none;-webkit-user-select:none;}",
+      ".settings{position:absolute;z-index:1;width:208px;box-sizing:border-box;padding:10px;display:none;flex-direction:column;gap:8px;border:1px solid var(--glass-border);border-radius:14px;background-color:var(--glass-bg-strong);background-image:linear-gradient(180deg,var(--sheen),rgba(255,255,255,0) 40%);box-shadow:inset 0 1px 1px var(--rim-top),0 12px 32px var(--shadow-color);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:12px;color:var(--ink);cursor:default;user-select:none;-webkit-user-select:none;max-height:calc(100vh - " + (EDGE_MARGIN * 2) + "px);overflow-y:auto;overscroll-behavior:contain;}",
       ".settings.open{display:flex;}",
       ".settings-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;}",
       ".settings-close{width:16px;height:16px;border-radius:999px;border:1px solid var(--glass-border);background:var(--chip-bg);color:var(--ink);font-size:10px;font-weight:700;}",
@@ -508,10 +635,24 @@
       ".settings-row{display:flex;align-items:center;justify-content:space-between;gap:6px;}",
       ".settings-row label{color:var(--ink-dim);}",
       ".settings-field{display:flex;align-items:center;gap:4px;}",
-      ".settings-field span{color:var(--ink-faint);font-size:11px;}",
+      ".settings-field span{min-width:16px;color:var(--ink-faint);font-size:11px;}",
+      ".settings-section{display:flex;align-items:center;justify-content:space-between;min-height:18px;color:var(--ink-faint);font-size:11px;font-weight:600;}",
+      ".settings-sep{flex:none;height:1px;background:var(--divider);}",
+      ".settings-key{display:block;width:84px;height:24px;padding:0 6px;border:1px solid var(--field-border);border-radius:6px;background:var(--field-bg);color:var(--ink);font-size:12px;font-weight:600;line-height:22px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
+      ".settings-key:hover{border-color:var(--ink-faint);}",
+      ".settings-key.recording{border-color:#0a84ff;color:#0a84ff;font-weight:500;box-shadow:0 0 0 3px rgba(10,132,255,.22);}",
+      ".switch{position:relative;flex:none;width:30px;height:18px;border-radius:999px;background:var(--field-border);transition:background-color .18s ease;}",
+      ".switch::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:999px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .18s ease;}",
+      ".switch[aria-checked=true]{background:#0a84ff;}",
+      ".switch[aria-checked=true]::after{transform:translateX(12px);}",
+      "@media (prefers-reduced-motion:reduce){.switch,.switch::after{transition:none;}}",
+      ".settings button:disabled,.settings input:disabled{opacity:.4;cursor:default;}",
+      ".settings button:focus-visible{outline:2px solid #0a84ff;outline-offset:2px;}",
+      ".settings .settings-key.recording{outline:none;}",
       ".settings-row input{width:64px;box-sizing:border-box;padding:4px 6px;border:1px solid var(--field-border);border-radius:6px;background:var(--field-bg);color:var(--ink);font-size:12px;font-family:inherit;outline:none;user-select:text;-webkit-user-select:text;}",
       ".settings-row input:focus{border-color:#0a84ff;}",
       ".settings-hint{color:var(--ink-faint);font-size:11px;line-height:1.5;}",
+      ".settings-hint.error{color:var(--danger);}",
       ".settings-actions{display:flex;justify-content:flex-end;gap:6px;}",
       ".settings-actions button{padding:5px 9px;border-radius:6px;border:1px solid var(--glass-border);background:var(--chip-bg);color:var(--ink);font-size:11px;font-weight:600;}",
       ".settings-actions button:hover{background:var(--chip-hover);}",
@@ -561,41 +702,77 @@
     buildLens(shadow);
   }
 
-  function makeSettingsInput() {
+  function makeSettingsInput(min, max, step) {
     var input = document.createElement("input");
     input.type = "number";
-    input.min = "0";
-    input.max = "100";
-    input.step = "1";
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
     return input;
   }
 
-  function makeSettingsRow(labelText, input) {
+  function makeSettingsRow(labelText, control, unitText) {
     var row = document.createElement("div");
     row.className = "settings-row";
     var label = document.createElement("label");
     label.textContent = labelText;
     var field = document.createElement("div");
     field.className = "settings-field";
-    var unit = document.createElement("span");
-    unit.textContent = "%";
-    field.appendChild(input);
-    field.appendChild(unit);
+    field.appendChild(control);
+    if (unitText) {
+      var unit = document.createElement("span");
+      unit.textContent = unitText;
+      field.appendChild(unit);
+    }
     row.appendChild(label);
     row.appendChild(field);
     return row;
+  }
+
+  function makeSettingsSection(text, control) {
+    var section = document.createElement("div");
+    section.className = "settings-section";
+    var label = document.createElement("span");
+    label.textContent = text;
+    section.appendChild(label);
+    if (control) section.appendChild(control);
+    return section;
+  }
+
+  function makeSettingsHint(text) {
+    var hint = document.createElement("div");
+    hint.className = "settings-hint";
+    hint.textContent = text;
+    return hint;
+  }
+
+  function makeHotkeyButton(action) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "settings-key";
+    button.addEventListener("click", function (event) {
+      // Space activates a button on keyup, so the key that just finished a
+      // recording can click the button again; don't let it restart one.
+      if (event.detail === 0 && Date.now() - recordFinishedAt < 500) return;
+      toggleRecording(action);
+    });
+    button.addEventListener("blur", function () {
+      if (recordingAction === action) stopRecording();
+    });
+    settingsKeyButtons[action] = button;
+    return button;
   }
 
   function buildSettings(shadow) {
     settingsEl = document.createElement("div");
     settingsEl.className = "settings glass-dark";
     settingsEl.setAttribute("role", "dialog");
-    settingsEl.setAttribute("aria-label", "PageScroll position settings");
+    settingsEl.setAttribute("aria-label", "PageScroll settings");
 
     var head = document.createElement("div");
     head.className = "settings-head";
     var title = document.createElement("span");
-    title.textContent = "位置设置";
+    title.textContent = "设置";
     var closeButton = document.createElement("button");
     closeButton.type = "button";
     closeButton.className = "settings-close";
@@ -605,31 +782,45 @@
     head.appendChild(title);
     head.appendChild(closeButton);
 
-    settingsInputX = makeSettingsInput();
-    settingsInputY = makeSettingsInput();
+    settingsInputX = makeSettingsInput(0, 100, 1);
+    settingsInputY = makeSettingsInput(0, 100, 1);
+    settingsInputInterval = makeSettingsInput(MIN_HOTKEY_INTERVAL, MAX_HOTKEY_INTERVAL, 50);
 
-    var hint = document.createElement("div");
-    hint.className = "settings-hint";
-    hint.textContent = "控件中心相对窗口的百分比：0,0 为左上角，100,100 为右下角。修改会即时预览，保存后在所有页面生效。";
+    settingsHotkeySwitch = document.createElement("button");
+    settingsHotkeySwitch.type = "button";
+    settingsHotkeySwitch.className = "switch";
+    settingsHotkeySwitch.setAttribute("role", "switch");
+    settingsHotkeySwitch.setAttribute("aria-label", "启用连按快捷键");
+    settingsHotkeyHint = makeSettingsHint(HOTKEY_HINT);
 
     var actions = document.createElement("div");
     actions.className = "settings-actions";
     var resetButton = document.createElement("button");
     resetButton.type = "button";
     resetButton.textContent = "恢复内置";
-    resetButton.title = "恢复内置默认位置（右侧 20% 高度）";
+    resetButton.title = "恢复内置默认位置（右侧 20% 高度）和快捷键（连按 ↑ / ↓）";
     var saveButton = document.createElement("button");
     saveButton.type = "button";
     saveButton.className = "primary";
     saveButton.textContent = "保存";
-    saveButton.title = "保存为默认位置";
+    saveButton.title = "保存位置和快捷键";
     actions.appendChild(resetButton);
     actions.appendChild(saveButton);
 
+    var separator = document.createElement("div");
+    separator.className = "settings-sep";
+
     settingsEl.appendChild(head);
-    settingsEl.appendChild(makeSettingsRow("横向位置", settingsInputX));
-    settingsEl.appendChild(makeSettingsRow("纵向位置", settingsInputY));
-    settingsEl.appendChild(hint);
+    settingsEl.appendChild(makeSettingsSection("位置"));
+    settingsEl.appendChild(makeSettingsRow("横向位置", settingsInputX, "%"));
+    settingsEl.appendChild(makeSettingsRow("纵向位置", settingsInputY, "%"));
+    settingsEl.appendChild(makeSettingsHint("控件中心相对窗口的百分比：0,0 为左上角，100,100 为右下角。修改会即时预览，保存后在所有页面生效。"));
+    settingsEl.appendChild(separator);
+    settingsEl.appendChild(makeSettingsSection("连按快捷键", settingsHotkeySwitch));
+    settingsEl.appendChild(makeSettingsRow("回到顶部", makeHotkeyButton("top")));
+    settingsEl.appendChild(makeSettingsRow("跳到底部", makeHotkeyButton("bottom")));
+    settingsEl.appendChild(makeSettingsRow("连按间隔", settingsInputInterval, "ms"));
+    settingsEl.appendChild(settingsHotkeyHint);
     settingsEl.appendChild(actions);
 
     var swallowed = ["pointerdown", "pointermove", "pointerup", "pointercancel", "click", "dblclick", "contextmenu", "wheel", "keyup", "keypress"];
@@ -639,7 +830,9 @@
       });
     }
     settingsEl.addEventListener("keydown", function (event) {
-      if (event.key === "Escape") {
+      if (recordingAction) {
+        onRecordKeyDown(event);
+      } else if (event.key === "Escape") {
         closeSettings();
       } else if (event.key === "Enter" && event.target && event.target.tagName === "INPUT") {
         saveSettings();
@@ -649,8 +842,14 @@
 
     settingsInputX.addEventListener("input", onSettingsInput);
     settingsInputY.addEventListener("input", onSettingsInput);
+    settingsHotkeySwitch.addEventListener("click", function () {
+      if (!hotkeyDraft) return;
+      hotkeyDraft.enabled = !hotkeyDraft.enabled;
+      stopRecording();
+      refreshHotkeyFields();
+    });
     closeButton.addEventListener("click", closeSettings);
-    resetButton.addEventListener("click", resetDefaultPosition);
+    resetButton.addEventListener("click", resetAllSettings);
     saveButton.addEventListener("click", saveSettings);
 
     shadow.appendChild(settingsEl);
@@ -680,7 +879,7 @@
     var hostPosition = currentPosition || getHostPosition();
     var rect = settingsEl.getBoundingClientRect();
     var width = rect.width || 208;
-    var height = rect.height || 170;
+    var height = rect.height || 360;
 
     var left = -(width + 8);
     if (hostPosition.left + left < EDGE_MARGIN) left = size.width + 8;
@@ -695,6 +894,7 @@
   }
 
   function onSettingsInput() {
+    settingsPositionDirty = true;
     previewRatio = readSettingsInputs();
     if (!destroyed && host) applyHostStyle(positionFromCenterRatio(previewRatio));
     scheduleGlassUpdate();
@@ -703,8 +903,10 @@
   function openSettings() {
     if (destroyed || !settingsEl) return;
     settingsOpen = true;
+    settingsPositionDirty = false;
     settingsEl.classList.add("open");
     syncSettingsInputs();
+    loadHotkeyDraft();
     positionSettings();
     try {
       settingsInputY.focus({ preventScroll: true });
@@ -715,6 +917,7 @@
   }
 
   function closeSettings() {
+    stopRecording();
     settingsOpen = false;
     previewRatio = null;
     if (settingsEl) settingsEl.classList.remove("open");
@@ -726,9 +929,109 @@
   }
 
   function saveSettings() {
-    persistDefaultRatio(readSettingsInputs());
-    manualPositionRatio = null;
+    // Only commit a position the user actually chose (typed or dragged), so
+    // saving just the shortcuts never freezes the built-in default into a
+    // rounded ratio.
+    if (settingsPositionDirty || manualPositionRatio) {
+      persistDefaultRatio(readSettingsInputs());
+      manualPositionRatio = null;
+    }
+    if (hotkeyDraft) persistHotkeys(readHotkeyDraft());
     closeSettings();
+  }
+
+  function loadHotkeyDraft() {
+    recordingAction = null;
+    hotkeyDraft = cloneHotkeys(hotkeyConfig);
+    if (settingsInputInterval) settingsInputInterval.value = String(hotkeyDraft.interval);
+    refreshHotkeyFields();
+    setHotkeyHint();
+  }
+
+  function readHotkeyDraft() {
+    var interval = settingsInputInterval ? parseFloat(settingsInputInterval.value) : NaN;
+    var config = cloneHotkeys(hotkeyDraft);
+    if (isFinite(interval)) config.interval = clampInterval(interval);
+    return config;
+  }
+
+  function hotkeyActionName(action) {
+    return action === "top" ? "回到顶部" : "跳到底部";
+  }
+
+  function refreshHotkeyFields() {
+    if (!hotkeyDraft || !settingsHotkeySwitch) return;
+    var enabled = hotkeyDraft.enabled;
+    settingsHotkeySwitch.setAttribute("aria-checked", enabled ? "true" : "false");
+    settingsHotkeySwitch.title = enabled ? "已启用，点击停用" : "已停用，点击启用";
+    var actions = ["top", "bottom"];
+    for (var index = 0; index < actions.length; index += 1) {
+      var action = actions[index];
+      var button = settingsKeyButtons[action];
+      if (!button) continue;
+      var recording = recordingAction === action;
+      var label = comboLabel(hotkeyDraft[action]);
+      button.disabled = !enabled;
+      button.classList.toggle("recording", recording);
+      button.textContent = recording ? "按下按键…" : label;
+      button.title = recording ? "按下新的快捷键，Esc 取消" : label + "（点击后按下新按键修改）";
+      button.setAttribute("aria-label", hotkeyActionName(action) + "快捷键：" + label);
+    }
+    if (settingsInputInterval) settingsInputInterval.disabled = !enabled;
+  }
+
+  function setHotkeyHint(text, isError) {
+    if (!settingsHotkeyHint) return;
+    settingsHotkeyHint.textContent = text || HOTKEY_HINT;
+    settingsHotkeyHint.classList.toggle("error", !!isError);
+  }
+
+  function toggleRecording(action) {
+    if (recordingAction === action) {
+      stopRecording();
+      return;
+    }
+    if (!hotkeyDraft || !hotkeyDraft.enabled) return;
+    recordingAction = action;
+    refreshHotkeyFields();
+    setHotkeyHint();
+    try {
+      // Safari/Firefox on macOS don't focus buttons on click; keydown must
+      // land here rather than reach the page.
+      settingsKeyButtons[action].focus({ preventScroll: true });
+    } catch (error) {
+      // Recording still ends on blur or Esc.
+    }
+  }
+
+  function stopRecording() {
+    if (!recordingAction) return;
+    recordingAction = null;
+    refreshHotkeyFields();
+    setHotkeyHint();
+  }
+
+  function onRecordKeyDown(event) {
+    if (event.key === "Tab") {
+      stopRecording();
+      return;
+    }
+    event.preventDefault();
+    if (event.repeat || event.isComposing) return;
+    if (event.key === "Escape") {
+      stopRecording();
+      return;
+    }
+    var combo = comboFromEvent(event);
+    if (!combo) return;
+    var other = recordingAction === "top" ? "bottom" : "top";
+    if (sameCombo(combo, hotkeyDraft[other])) {
+      setHotkeyHint("「" + comboLabel(combo) + "」已用于" + hotkeyActionName(other) + "，请换一个按键。", true);
+      return;
+    }
+    hotkeyDraft[recordingAction] = combo;
+    recordFinishedAt = Date.now();
+    stopRecording();
   }
 
   function onPanelContextMenu(event) {
@@ -1059,6 +1362,9 @@
     manualPositionRatio = null;
     previewRatio = null;
     settingsOpen = false;
+    recordingAction = null;
+    hotkeyPending = null;
+    lastPointerTarget = null;
     clearLingerTimer();
     stopBeacon();
     if (ensureTimer) window.clearInterval(ensureTimer);
@@ -1070,6 +1376,8 @@
     if (host && host.parentNode) host.parentNode.removeChild(host);
     window.removeEventListener("resize", onResize, true);
     window.removeEventListener("scroll", onAnyScroll, true);
+    window.removeEventListener("keydown", onHotkeyKeyDown, false);
+    window.removeEventListener("pointerdown", onDocumentPointerDown, true);
   }
 
   function onResize() {
@@ -1094,6 +1402,7 @@
     savedDefaultRatio = null;
     manualPositionRatio = null;
     previewRatio = null;
+    settingsPositionDirty = false;
     removeStorage(STORAGE_KEY);
     if (!destroyed && host) applyHostStyle(preferredPosition());
     if (settingsOpen) {
@@ -1102,10 +1411,22 @@
     }
   }
 
+  function resetHotkeys() {
+    hotkeyConfig = defaultHotkeys();
+    hotkeyPending = null;
+    removeStorage(HOTKEY_STORAGE_KEY);
+    if (settingsOpen) loadHotkeyDraft();
+  }
+
+  function resetAllSettings() {
+    resetDefaultPosition();
+    resetHotkeys();
+  }
+
   function registerMenuCommands() {
     if (typeof GM_registerMenuCommand !== "function") return;
     try {
-      GM_registerMenuCommand("打开位置设置（或右键悬浮控件）", openSettings);
+      GM_registerMenuCommand("打开设置（或右键悬浮控件）", openSettings);
       GM_registerMenuCommand("保存当前位置为默认位置", saveCurrentPositionAsDefault);
       GM_registerMenuCommand("恢复内置默认位置（右侧 20% 高度）", resetDefaultPosition);
     } catch (error) {
@@ -1293,20 +1614,98 @@
     requestAnimationFrame(step);
   }
 
-  function scrollPage(direction) {
-    var target = findPrimaryScroller();
+  function scrollPage(direction, scroller) {
+    var target = scroller || findPrimaryScroller();
     if (!target) return;
 
     var targetTop = direction === "top" ? 0 : maxScrollTop(target);
     animateScroll(target, targetTop);
   }
 
+  function eventOrigin(event) {
+    var path = typeof event.composedPath === "function" ? event.composedPath() : null;
+    return path && path.length ? path[0] : event.target;
+  }
+
+  function isKeyOwner(node) {
+    if (document.designMode === "on") return true;
+    if (!node || node.nodeType !== 1) return false;
+    if (node.isContentEditable) return true;
+    return typeof node.closest === "function" && !!node.closest(KEY_OWNER_SELECTOR);
+  }
+
+  function isKeyboardScrollable(element) {
+    if (maxScrollTop(element) <= 8) return false;
+    var overflowY = window.getComputedStyle(element).overflowY;
+    return overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
+  }
+
+  // Nearest ancestor a user could scroll with the keyboard, walking the
+  // flat tree through open shadow roots; the root scroller if none.
+  function scrollerAround(node) {
+    while (node && node !== document) {
+      if (node === host) return null;
+      if (node.nodeType === 1) {
+        if (isRootScroller(node)) break;
+        if (isKeyboardScrollable(node)) return node;
+      }
+      node = node.assignedSlot || node.parentNode || (node.nodeType === 11 ? node.host : null);
+    }
+    var root = getRootScroller();
+    return maxScrollTop(root) > 8 ? root : null;
+  }
+
+  // Arrow keys natively scroll the container holding focus or, failing
+  // that, the one clicked last. Aim the jump at that same container so a
+  // double-tap finishes what a single tap was scrolling; with neither
+  // known, fall back to the widget's own targeting like a button click.
+  function keyboardScroller(event) {
+    var origin = eventOrigin(event);
+    if (!origin || origin === host || origin === document.body || origin === document.documentElement || origin === document || origin === window) {
+      origin = lastPointerTarget && lastPointerTarget.isConnected ? lastPointerTarget : null;
+    }
+    return origin ? scrollerAround(origin) : null;
+  }
+
+  function onDocumentPointerDown(event) {
+    var origin = eventOrigin(event);
+    if (origin && origin !== host) lastPointerTarget = origin;
+  }
+
+  // Registered in the bubble phase so a page that already handled the key
+  // (preventDefault: players, editors, slide decks) keeps it.
+  function onHotkeyKeyDown(event) {
+    if (destroyed || !hotkeyConfig || !hotkeyConfig.enabled) return;
+    var combo = comboFromEvent(event);
+    // A lone modifier (e.g. Shift held for a Shift+↑ binding) or an IME
+    // placeholder neither counts nor breaks the pending first tap.
+    if (!combo) return;
+    var action = sameCombo(combo, hotkeyConfig.top) ? "top" : sameCombo(combo, hotkeyConfig.bottom) ? "bottom" : null;
+    if (!action || event.repeat || event.defaultPrevented || event.isComposing || isKeyOwner(eventOrigin(event))) {
+      hotkeyPending = null;
+      return;
+    }
+    var now = Date.now();
+    if (hotkeyPending && hotkeyPending.action === action && now - hotkeyPending.time <= hotkeyConfig.interval) {
+      hotkeyPending = null;
+      // Suppress the second tap's own step scroll; the first tap's already
+      // happened and the jump animation starts from wherever it landed.
+      event.preventDefault();
+      scrollPage(action, keyboardScroller(event));
+      return;
+    }
+    hotkeyPending = { action: action, time: now };
+  }
+
   savedDefaultRatio = loadSavedDefaultRatio();
+  hotkeyConfig = loadHotkeys();
   mountHost();
   requestBeacon(BEACON_CYCLE_MS * 3);
   ensureTimer = window.setInterval(mountHost, 1000);
   window.addEventListener("resize", onResize, true);
   window.addEventListener("scroll", onAnyScroll, { capture: true, passive: true });
+  window.addEventListener("keydown", onHotkeyKeyDown, false);
+  window.addEventListener("pointerdown", onDocumentPointerDown, { capture: true, passive: true });
   document.addEventListener("DOMContentLoaded", mountHost, { once: true, capture: true });
   window.addEventListener("load", mountHost, { once: true, capture: true });
   registerMenuCommands();

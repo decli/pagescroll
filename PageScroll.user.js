@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.13.0
+// @version      0.13.1
 // @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Double-tap ↑ / ↓ (customizable) to jump to the top / bottom. Right-click to configure its default position and shortcuts. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -89,7 +89,6 @@
   var hotkeyPending = null;
   var recordingAction = null;
   var recordFinishedAt = 0;
-  var lastPointerTarget = null;
   var glassLight = false;
   var glassUpdateTimer = null;
   var lensEl = null;
@@ -1110,7 +1109,8 @@
     }, 180);
   }
 
-  function onAnyScroll() {
+  function onAnyScroll(event) {
+    noteHotkeyScroll(event.target);
     scheduleGlassUpdate();
     if (!destroyed && collapsed) requestBeacon(BEACON_CYCLE_MS * 2);
   }
@@ -1364,7 +1364,6 @@
     settingsOpen = false;
     recordingAction = null;
     hotkeyPending = null;
-    lastPointerTarget = null;
     clearLingerTimer();
     stopBeacon();
     if (ensureTimer) window.clearInterval(ensureTimer);
@@ -1376,8 +1375,7 @@
     if (host && host.parentNode) host.parentNode.removeChild(host);
     window.removeEventListener("resize", onResize, true);
     window.removeEventListener("scroll", onAnyScroll, true);
-    window.removeEventListener("keydown", onHotkeyKeyDown, false);
-    window.removeEventListener("pointerdown", onDocumentPointerDown, true);
+    window.removeEventListener("keydown", onHotkeyKeyDown, true);
   }
 
   function onResize() {
@@ -1640,40 +1638,42 @@
     return overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
   }
 
-  // Nearest ancestor a user could scroll with the keyboard, walking the
-  // flat tree through open shadow roots; the root scroller if none.
-  function scrollerAround(node) {
+  function canScrollToward(element, direction) {
+    var top = getScrollTop(element);
+    return direction === "top" ? top > 1 : top < maxScrollTop(element) - 1;
+  }
+
+  // From the container the first tap scrolled, chain outward the way
+  // repeated arrow presses would: skip containers already at the end, and
+  // ones whose range is small next to their own height (a carousel strip a
+  // few px taller than its box, decorative overflow), which a jump to the
+  // top/bottom doesn't mean. Null leaves it to the button's own targeting.
+  function jumpScrollerFrom(node, direction) {
     while (node && node !== document) {
       if (node === host) return null;
       if (node.nodeType === 1) {
         if (isRootScroller(node)) break;
-        if (isKeyboardScrollable(node)) return node;
+        if (isKeyboardScrollable(node) && maxScrollTop(node) >= node.clientHeight / 2 && canScrollToward(node, direction)) return node;
       }
       node = node.assignedSlot || node.parentNode || (node.nodeType === 11 ? node.host : null);
     }
     var root = getRootScroller();
-    return maxScrollTop(root) > 8 ? root : null;
+    return maxScrollTop(root) > 8 && canScrollToward(root, direction) ? root : null;
   }
 
-  // Arrow keys natively scroll the container holding focus or, failing
-  // that, the one clicked last. Aim the jump at that same container so a
-  // double-tap finishes what a single tap was scrolling; with neither
-  // known, fall back to the widget's own targeting like a button click.
-  function keyboardScroller(event) {
-    var origin = eventOrigin(event);
-    if (!origin || origin === host || origin === document.body || origin === document.documentElement || origin === document || origin === window) {
-      origin = lastPointerTarget && lastPointerTarget.isConnected ? lastPointerTarget : null;
-    }
-    return origin ? scrollerAround(origin) : null;
+  // Remember which container the first tap actually scrolled -- natively,
+  // or by the page's own script -- so the jump finishes exactly what that
+  // tap started instead of guessing from focus or layout.
+  function noteHotkeyScroll(target) {
+    if (!hotkeyPending || hotkeyPending.scroller || !target) return;
+    var root = target === document || target === window || isRootScroller(target);
+    var element = root ? getRootScroller() : target;
+    if (!element || element === host || element.nodeType !== 1) return;
+    if (root ? maxScrollTop(element) > 8 : isKeyboardScrollable(element)) hotkeyPending.scroller = element;
   }
 
-  function onDocumentPointerDown(event) {
-    var origin = eventOrigin(event);
-    if (origin && origin !== host) lastPointerTarget = origin;
-  }
-
-  // Registered in the bubble phase so a page that already handled the key
-  // (preventDefault: players, editors, slide decks) keeps it.
+  // Runs in the capture phase, ahead of page scripts, so a site that stops
+  // keydown propagation can't swallow the shortcut.
   function onHotkeyKeyDown(event) {
     if (destroyed || !hotkeyConfig || !hotkeyConfig.enabled) return;
     var combo = comboFromEvent(event);
@@ -1681,20 +1681,25 @@
     // placeholder neither counts nor breaks the pending first tap.
     if (!combo) return;
     var action = sameCombo(combo, hotkeyConfig.top) ? "top" : sameCombo(combo, hotkeyConfig.bottom) ? "bottom" : null;
-    if (!action || event.repeat || event.defaultPrevented || event.isComposing || isKeyOwner(eventOrigin(event))) {
+    var origin = eventOrigin(event);
+    if (!action || event.repeat || event.isComposing || isKeyOwner(origin) || (settingsOpen && origin === host)) {
       hotkeyPending = null;
       return;
     }
     var now = Date.now();
-    if (hotkeyPending && hotkeyPending.action === action && now - hotkeyPending.time <= hotkeyConfig.interval) {
+    var first = hotkeyPending;
+    if (first && first.action === action && now - first.time <= hotkeyConfig.interval) {
       hotkeyPending = null;
-      // Suppress the second tap's own step scroll; the first tap's already
-      // happened and the jump animation starts from wherever it landed.
+      // The page consumed the first tap and nothing scrolled: it uses this
+      // key itself (a game, a player, slides), so leave it alone.
+      if (first.event.defaultPrevented && !first.scroller) return;
+      // Suppress the second tap's own step; the jump animation starts from
+      // wherever the first tap landed.
       event.preventDefault();
-      scrollPage(action, keyboardScroller(event));
+      scrollPage(action, first.scroller && first.scroller.isConnected ? jumpScrollerFrom(first.scroller, action) : null);
       return;
     }
-    hotkeyPending = { action: action, time: now };
+    hotkeyPending = { action: action, time: now, event: event, scroller: null };
   }
 
   savedDefaultRatio = loadSavedDefaultRatio();
@@ -1704,8 +1709,7 @@
   ensureTimer = window.setInterval(mountHost, 1000);
   window.addEventListener("resize", onResize, true);
   window.addEventListener("scroll", onAnyScroll, { capture: true, passive: true });
-  window.addEventListener("keydown", onHotkeyKeyDown, false);
-  window.addEventListener("pointerdown", onDocumentPointerDown, { capture: true, passive: true });
+  window.addEventListener("keydown", onHotkeyKeyDown, true);
   document.addEventListener("DOMContentLoaded", mountHost, { once: true, capture: true });
   window.addEventListener("load", mountHost, { once: true, capture: true });
   registerMenuCommands();

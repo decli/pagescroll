@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Page Scroll Floating Arrows
 // @namespace    https://github.com/decli/pagescroll
-// @version      0.13.1
+// @version      0.13.2
 // @description  Liquid-glass floating scroll control: a collapsed glass ball that expands on hover (auto-collapses 3s after you leave), with refractive edges on Chromium and adaptive light/dark material. Double-tap ↑ / ↓ (customizable) to jump to the top / bottom. Right-click to configure its default position and shortcuts. Supports SPA pages with custom scroll containers.
 // @author       decli
 // @license      MIT
@@ -1612,12 +1612,27 @@
     requestAnimationFrame(step);
   }
 
+  // Chat UIs (ChatGPT among them) anchor the thread to its newest message
+  // with flex-direction:column-reverse. Browsers then count scrollTop from
+  // the bottom: 0 is the end and scrolling up goes negative, so "top" is
+  // -range rather than 0.
+  function isReversedScroller(element) {
+    if (isRootScroller(element)) return false;
+    if (element.scrollTop < 0) return true;
+    var style = window.getComputedStyle(element);
+    return /flex/.test(style.display) && style.flexDirection === "column-reverse";
+  }
+
+  function scrollTargetTop(element, direction) {
+    var range = maxScrollTop(element);
+    if (isReversedScroller(element)) return direction === "top" ? -range : 0;
+    return direction === "top" ? 0 : range;
+  }
+
   function scrollPage(direction, scroller) {
     var target = scroller || findPrimaryScroller();
     if (!target) return;
-
-    var targetTop = direction === "top" ? 0 : maxScrollTop(target);
-    animateScroll(target, targetTop);
+    animateScroll(target, scrollTargetTop(target, direction));
   }
 
   function eventOrigin(event) {
@@ -1639,8 +1654,7 @@
   }
 
   function canScrollToward(element, direction) {
-    var top = getScrollTop(element);
-    return direction === "top" ? top > 1 : top < maxScrollTop(element) - 1;
+    return Math.abs(scrollTargetTop(element, direction) - getScrollTop(element)) > 1;
   }
 
   // From the container the first tap scrolled, chain outward the way
